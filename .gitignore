@@ -1,0 +1,15 @@
+# 시스템 생성 파일
+.bash_history
+.cache/
+.wget-hsts
+
+# 보안 관련
+.ssh/
+
+# 개발 환경
+.vscode-server/
+.dotnet/
+
+# 운영체제별
+.DS_Store
+Thumbs.db
