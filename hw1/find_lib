@@ -1,0 +1,18 @@
+# 1.1-(a)
+find /usr/lib/gcc/x86_64-linux-gnu/9/include -name "stdio.h"
+find /usr/local/include -name "stdio.h"
+find /usr/include/x86_64-linux-gnu -name "stdio.h"
+find /usr/include -name "stdio.h"
+wc -l /usr/include/stdio.h
+
+find /usr/lib/gcc/x86_64-linux-gnu/9/include -name "math.h"
+find /usr/local/include -name "math.h"
+find /usr/include/x86_64-linux-gnu -name "math.h"
+find /usr/include -name "math.h"
+wc -l /usr/include/math.h
+
+# 1.1-(b)
+cd sqrt
+gcc -E sqrt.c -o sqrt.i
+cat sqrt.i
+cd ..

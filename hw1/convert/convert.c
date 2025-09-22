@@ -15,7 +15,16 @@ void print_int(int x) {
   };
 
   /* YOUR CODE START HERE */
-
+  union {
+    int x;
+    unsigned int b;
+  } tp;
+  tp.x = x;
+  
+  for (int i=0; i<32; i++) {
+    output[31-i] = (tp.b & 1) + '0';
+    tp.b >>= 1;
+  }
   /* YOUR CODE END HERE */
 
   printf("%s\n", output);
@@ -28,7 +37,16 @@ void print_long(long x) {
   };
 
   /* YOUR CODE START HERE */
+  union {
+    long x;
+    unsigned long b;
+  } tp;
+  tp.x = x;
 
+  for (int i=0; i<64; i++) {
+    output[63-i] = (tp.b & 1) + '0';
+    tp.b >>= 1;
+  }
   /* YOUR CODE END HERE */
 
   printf("%s\n", output);
@@ -40,7 +58,16 @@ void print_float(float x) {
       0,
   };
   /* YOUR CODE START HERE */
-
+  union {
+    float x;
+    unsigned int b;
+  } tp;
+  tp.x = x;
+  
+  for (int i=0; i<32; i++) {
+    output[31-i] = (tp.b & 1) + '0';
+    tp.b >>= 1;
+  }
   /* YOUR CODE END HERE */
 
   printf("%s\n", output);
@@ -53,7 +80,16 @@ void print_double(double x) {
   };
 
   /* YOUR CODE START HERE */
-
+  union {
+    double x;
+    unsigned long b;
+  } tp;
+  tp.x = x;
+  
+  for (int i=0; i<64; i++) {
+    output[63-i] = (tp.b & 1) + '0';
+    tp.b >>= 1;
+  }
   /* YOUR CODE END HERE */
   printf("%s\n", output);
 }
