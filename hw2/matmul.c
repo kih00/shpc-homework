@@ -27,7 +27,48 @@ static void *matmul_kernel(void *arg) {
 
   /*
   TODO: FILL IN HERE
+  (M, K) * (K, N) => (M, N)
   */
+  int rows_per_thread = M / num_threads;
+  int rem = M % num_threads;
+  const int BLOCK_SIZE = 128;
+
+  int row_start, row_end;
+  if (rank < rem) {
+    row_start = (rows_per_thread + 1) * rank;
+    row_end = row_start + rows_per_thread + 1;
+  } else {
+    row_start = rows_per_thread * rank + rem;
+    row_end = row_start + rows_per_thread;
+  }
+
+  for (int its = row_start; its < row_end; its += BLOCK_SIZE) {
+    for (int kts = 0; kts < K; kts += BLOCK_SIZE) {
+      for (int jts = 0; jts < N; jts += BLOCK_SIZE) {
+        int ite = (its + BLOCK_SIZE < row_end) ? its + BLOCK_SIZE : row_end;
+        int kte = (kts + BLOCK_SIZE < K) ? kts + BLOCK_SIZE : K;
+        int jte = (jts + BLOCK_SIZE < N) ? jts + BLOCK_SIZE : N;
+
+        for (int i = its; i < ite; ++i) {
+          for (int k = kts; k < kte; ++k) {
+            float aik = A[i * K + k];
+            for (int j = jts; j < jte; ++j) {
+              C[i * N + j] += aik * B[k * N + j];
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // for (int i = row_start; i < row_end; ++i) {
+  //   for (int k = 0; k < K; ++k) {
+  //     float aik = A[i * K + k];
+  //     for (int j = 0; j < N; ++j) {
+  //       C[i * N + j] += aik * B[k * N + j];
+  //     }
+  //   }
+  // }
 
   return NULL;
 }
