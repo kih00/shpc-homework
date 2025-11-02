@@ -1,0 +1,398 @@
+make: Nothing to be done for 'all'.
+Options:
+  Problem size: M = 128, N = 128, K = 128
+  Number of threads: 1
+  Block size: 128
+Initializing... done!
+Calculating...(iter=0) 0.000311 sec
+Calculating...(iter=1) 0.000314 sec
+Calculating...(iter=2) 0.000313 sec
+Validating...
+Result: VALID
+Avg. time: 0.000313 sec
+Avg. throughput: 13.411873 GFLOPS
+================================
+Options:
+  Problem size: M = 192, N = 192, K = 192
+  Number of threads: 1
+  Block size: 192
+Initializing... done!
+Calculating...(iter=0) 0.001052 sec
+Calculating...(iter=1) 0.001046 sec
+Calculating...(iter=2) 0.001062 sec
+Validating...
+Result: VALID
+Avg. time: 0.001053 sec
+Avg. throughput: 13.437365 GFLOPS
+================================
+Options:
+  Problem size: M = 256, N = 256, K = 256
+  Number of threads: 1
+  Block size: 256
+Initializing... done!
+Calculating...(iter=0) 0.002211 sec
+Calculating...(iter=1) 0.002212 sec
+Calculating...(iter=2) 0.002218 sec
+Validating...
+Result: VALID
+Avg. time: 0.002214 sec
+Avg. throughput: 15.158446 GFLOPS
+================================
+Options:
+  Problem size: M = 320, N = 320, K = 320
+  Number of threads: 1
+  Block size: 320
+Initializing... done!
+Calculating...(iter=0) 0.004557 sec
+Calculating...(iter=1) 0.004392 sec
+Calculating...(iter=2) 0.004391 sec
+Validating...
+Result: VALID
+Avg. time: 0.004447 sec
+Avg. throughput: 14.738595 GFLOPS
+================================
+Options:
+  Problem size: M = 384, N = 384, K = 384
+  Number of threads: 1
+  Block size: 384
+Initializing... done!
+Calculating...(iter=0) 0.007362 sec
+Calculating...(iter=1) 0.007365 sec
+Calculating...(iter=2) 0.007355 sec
+Validating...
+Result: VALID
+Avg. time: 0.007361 sec
+Avg. throughput: 15.384984 GFLOPS
+================================
+Options:
+  Problem size: M = 448, N = 448, K = 448
+  Number of threads: 1
+  Block size: 448
+Initializing... done!
+Calculating...(iter=0) 0.012409 sec
+Calculating...(iter=1) 0.012393 sec
+Calculating...(iter=2) 0.012400 sec
+Validating...
+Result: VALID
+Avg. time: 0.012401 sec
+Avg. throughput: 14.501706 GFLOPS
+================================
+Options:
+  Problem size: M = 512, N = 512, K = 512
+  Number of threads: 1
+  Block size: 512
+Initializing... done!
+Calculating...(iter=0) 0.022209 sec
+Calculating...(iter=1) 0.022493 sec
+Calculating...(iter=2) 0.022903 sec
+Validating...
+Result: VALID
+Avg. time: 0.022535 sec
+Avg. throughput: 11.911963 GFLOPS
+================================
+Options:
+  Problem size: M = 576, N = 576, K = 576
+  Number of threads: 1
+  Block size: 576
+Initializing... done!
+Calculating...(iter=0) 0.031718 sec
+Calculating...(iter=1) 0.027165 sec
+Calculating...(iter=2) 0.025251 sec
+Validating...
+Result: VALID
+Avg. time: 0.028045 sec
+Avg. throughput: 13.628532 GFLOPS
+================================
+Options:
+  Problem size: M = 640, N = 640, K = 640
+  Number of threads: 1
+  Block size: 640
+Initializing... done!
+Calculating...(iter=0) 0.049273 sec
+Calculating...(iter=1) 0.048111 sec
+Calculating...(iter=2) 0.039810 sec
+Validating...
+Result: VALID
+Avg. time: 0.045732 sec
+Avg. throughput: 11.464482 GFLOPS
+================================
+Options:
+  Problem size: M = 704, N = 704, K = 704
+  Number of threads: 1
+  Block size: 704
+Initializing... done!
+Calculating...(iter=0) 0.063206 sec
+Calculating...(iter=1) 0.054429 sec
+Calculating...(iter=2) 0.054425 sec
+Validating...
+Result: VALID
+Avg. time: 0.057353 sec
+Avg. throughput: 12.167171 GFLOPS
+================================
+Options:
+  Problem size: M = 768, N = 768, K = 768
+  Number of threads: 1
+  Block size: 768
+Initializing... done!
+Calculating...(iter=0) 0.071775 sec
+Calculating...(iter=1) 0.071401 sec
+Calculating...(iter=2) 0.071401 sec
+Validating...
+Result: VALID
+Avg. time: 0.071526 sec
+Avg. throughput: 12.666344 GFLOPS
+================================
+Options:
+  Problem size: M = 832, N = 832, K = 832
+  Number of threads: 1
+  Block size: 832
+Initializing... done!
+Calculating...(iter=0) 0.091733 sec
+Calculating...(iter=1) 0.090580 sec
+Calculating...(iter=2) 0.090575 sec
+Validating...
+Result: VALID
+Avg. time: 0.090963 sec
+Avg. throughput: 12.662957 GFLOPS
+================================
+Options:
+  Problem size: M = 896, N = 896, K = 896
+  Number of threads: 1
+  Block size: 896
+Initializing... done!
+Calculating...(iter=0) 0.115562 sec
+Calculating...(iter=1) 0.115377 sec
+Calculating...(iter=2) 0.115297 sec
+Validating...
+Result: VALID
+Avg. time: 0.115412 sec
+Avg. throughput: 12.465346 GFLOPS
+================================
+Options:
+  Problem size: M = 960, N = 960, K = 960
+  Number of threads: 1
+  Block size: 960
+Initializing... done!
+Calculating...(iter=0) 0.141229 sec
+Calculating...(iter=1) 0.141230 sec
+Calculating...(iter=2) 0.141247 sec
+Validating...
+Result: VALID
+Avg. time: 0.141236 sec
+Avg. throughput: 12.528509 GFLOPS
+================================
+Options:
+  Problem size: M = 1024, N = 1024, K = 1024
+  Number of threads: 1
+  Block size: 1024
+Initializing... done!
+Calculating...(iter=0) 0.171373 sec
+Calculating...(iter=1) 0.171373 sec
+Calculating...(iter=2) 0.171202 sec
+Validating...
+Result: VALID
+Avg. time: 0.171316 sec
+Avg. throughput: 12.535204 GFLOPS
+================================
+Options:
+  Problem size: M = 1152, N = 1152, K = 1152
+  Number of threads: 1
+  Block size: 1152
+Initializing... done!
+Calculating...(iter=0) 0.238490 sec
+Calculating...(iter=1) 0.238471 sec
+Calculating...(iter=2) 0.238402 sec
+Validating...
+Result: VALID
+Avg. time: 0.238454 sec
+Avg. throughput: 12.822788 GFLOPS
+================================
+Options:
+  Problem size: M = 1280, N = 1280, K = 1280
+  Number of threads: 1
+  Block size: 1280
+Initializing... done!
+Calculating...(iter=0) 0.329588 sec
+Calculating...(iter=1) 0.329545 sec
+Calculating...(iter=2) 0.329423 sec
+Validating...
+Result: VALID
+Avg. time: 0.329519 sec
+Avg. throughput: 12.728582 GFLOPS
+================================
+Options:
+  Problem size: M = 1408, N = 1408, K = 1408
+  Number of threads: 1
+  Block size: 1408
+Initializing... done!
+Calculating...(iter=0) 0.439388 sec
+Calculating...(iter=1) 0.438856 sec
+Calculating...(iter=2) 0.439217 sec
+Validating...
+Result: VALID
+Avg. time: 0.439153 sec
+Avg. throughput: 12.712228 GFLOPS
+================================
+Options:
+  Problem size: M = 1536, N = 1536, K = 1536
+  Number of threads: 1
+  Block size: 1536
+Initializing... done!
+Calculating...(iter=0) 0.572352 sec
+Calculating...(iter=1) 0.572428 sec
+Calculating...(iter=2) 0.571861 sec
+Validating...
+Result: VALID
+Avg. time: 0.572214 sec
+Avg. throughput: 12.666172 GFLOPS
+================================
+Options:
+  Problem size: M = 1664, N = 1664, K = 1664
+  Number of threads: 1
+  Block size: 1664
+Initializing... done!
+Calculating...(iter=0) 0.743916 sec
+Calculating...(iter=1) 0.743403 sec
+Calculating...(iter=2) 0.743743 sec
+Validating...
+Result: VALID
+Avg. time: 0.743687 sec
+Avg. throughput: 12.390804 GFLOPS
+================================
+Options:
+  Problem size: M = 1792, N = 1792, K = 1792
+  Number of threads: 1
+  Block size: 1792
+Initializing... done!
+Calculating...(iter=0) 0.914866 sec
+Calculating...(iter=1) 0.914169 sec
+Calculating...(iter=2) 0.913688 sec
+Validating...
+Result: VALID
+Avg. time: 0.914241 sec
+Avg. throughput: 12.588772 GFLOPS
+================================
+Options:
+  Problem size: M = 1920, N = 1920, K = 1920
+  Number of threads: 1
+  Block size: 1920
+Initializing... done!
+Calculating...(iter=0) 1.200098 sec
+Calculating...(iter=1) 1.194191 sec
+Calculating...(iter=2) 1.193705 sec
+Validating...
+Result: VALID
+Avg. time: 1.195998 sec
+Avg. throughput: 11.835954 GFLOPS
+================================
+Options:
+  Problem size: M = 2048, N = 2048, K = 2048
+  Number of threads: 1
+  Block size: 2048
+Initializing... done!
+Calculating...(iter=0) 1.468047 sec
+Calculating...(iter=1) 1.470959 sec
+Calculating...(iter=2) 1.466210 sec
+Validating...
+Result: VALID
+Avg. time: 1.468405 sec
+Avg. throughput: 11.699679 GFLOPS
+================================
+Options:
+  Problem size: M = 2304, N = 2304, K = 2304
+  Number of threads: 1
+  Block size: 2304
+Initializing... done!
+Calculating...(iter=0) 2.371935 sec
+Calculating...(iter=1) 2.367136 sec
+Calculating...(iter=2) 2.369645 sec
+Validating...
+Result: VALID
+Avg. time: 2.369572 sec
+Avg. throughput: 10.323037 GFLOPS
+================================
+Options:
+  Problem size: M = 2560, N = 2560, K = 2560
+  Number of threads: 1
+  Block size: 2560
+Initializing... done!
+Calculating...(iter=0) 4.054161 sec
+Calculating...(iter=1) 4.050922 sec
+Calculating...(iter=2) 4.050126 sec
+Validating...
+Result: VALID
+Avg. time: 4.051736 sec
+Avg. throughput: 8.281494 GFLOPS
+================================
+Options:
+  Problem size: M = 2816, N = 2816, K = 2816
+  Number of threads: 1
+  Block size: 2816
+Initializing... done!
+Calculating...(iter=0) 6.205231 sec
+Calculating...(iter=1) 6.203074 sec
+Calculating...(iter=2) 6.199106 sec
+Validating...
+Result: VALID
+Avg. time: 6.202470 sec
+Avg. throughput: 7.200510 GFLOPS
+================================
+Options:
+  Problem size: M = 3072, N = 3072, K = 3072
+  Number of threads: 1
+  Block size: 3072
+Initializing... done!
+Calculating...(iter=0) 8.473612 sec
+Calculating...(iter=1) 8.466324 sec
+Calculating...(iter=2) 8.476071 sec
+Validating...
+Result: VALID
+Avg. time: 8.472002 sec
+Avg. throughput: 6.843962 GFLOPS
+================================
+Options:
+  Problem size: M = 3328, N = 3328, K = 3328
+  Number of threads: 1
+  Block size: 3328
+Initializing... done!
+Calculating...(iter=0) 12.461771 sec
+Calculating...(iter=1) 12.480727 sec
+Calculating...(iter=2) 12.488555 sec
+Validating...
+Result: VALID
+Avg. time: 12.477018 sec
+Avg. throughput: 5.908390 GFLOPS
+================================
+Options:
+  Problem size: M = 3584, N = 3584, K = 3584
+  Number of threads: 1
+  Block size: 3584
+Initializing... done!
+Calculating...(iter=0) 16.905634 sec
+Calculating...(iter=1) 16.905718 sec
+Calculating...(iter=2) 17.002980 sec
+Validating...
+Result: VALID
+Avg. time: 16.938111 sec
+Avg. throughput: 5.435870 GFLOPS
+================================
+Options:
+  Problem size: M = 3840, N = 3840, K = 3840
+  Number of threads: 1
+  Block size: 3840
+Initializing... done!
+Calculating...(iter=0) 21.422167 sec
+Calculating...(iter=1) 21.428581 sec
+Calculating...(iter=2) ================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 1
+  Block size: 4096
+Initializing... done!
+Calculating...(iter=0) 24.678682 sec
+Calculating...(iter=1) 24.677009 sec
+Calculating...(iter=2) ================================
+ANALYZING DONE!
+
+
+zipped:  [(128, 13.411873), (192, 13.437365), (256, 15.158446), (320, 14.738595), (384, 15.384984), (448, 14.501706), (512, 11.911963), (576, 13.628532), (640, 11.464482), (704, 12.167171), (768, 12.666344), (832, 12.662957), (896, 12.465346), (960, 12.528509), (1024, 12.535204), (1152, 12.822788), (1280, 12.728582), (1408, 12.712228), (1536, 12.666172), (1664, 12.390804), (1792, 12.588772), (1920, 11.835954), (2048, 11.699679), (2304, 10.323037), (2560, 8.281494), (2816, 7.20051), (3072, 6.843962), (3328, 5.90839), (3584, 5.43587)]

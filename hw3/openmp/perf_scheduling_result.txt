@@ -1,0 +1,144 @@
+## N = M = K = 4096
+## Number of theads: 32
+## chunk_size: 미지정
+===== static =====
+Avg. time: 0.410432 sec
+Avg. throughput: 334.864415 GFLOPS
+
+===== dynamic =====
+Avg. time: 0.408358 sec
+Avg. throughput: 336.565073 GFLOPS
+
+===== guided =====
+Avg. time: 0.406052 sec
+Avg. throughput: 338.476523 GFLOPS
+
+
+## N = M = K = 8192
+## Number of theads: 64
+## chunk_size: 미지정
+===== static =====
+Avg. time: 2.910941 sec
+Avg. throughput: 377.716926 GFLOPS
+
+===== dynamic =====
+Avg. time: 2.702315 sec
+Avg. throughput: 406.877732 GFLOPS
+
+===== guided =====
+Avg. time: 2.829473 sec
+Avg. throughput: 388.592315 GFLOPS
+
+
+## N = M = K = 1024
+## Number of theads: 128
+## chunk_size: 미지정
+===== static =====
+Avg. time: 0.026604 sec
+Avg. throughput: 80.720312 GFLOPS
+
+===== dynamic =====
+Avg. time: 0.042037 sec
+Avg. throughput: 51.084957 GFLOPS
+
+===== guided =====
+Avg. time: 0.041703 sec
+Avg. throughput: 51.495321 GFLOPS
+
+
+## N = M = K = 4096
+## Number of theads: 8
+## chunk_size: 미지정
+===== static =====
+Avg. time: 1.199520 sec
+Avg. throughput: 114.578339 GFLOPS
+
+===== dynamic =====
+Avg. time: 1.203742 sec
+Avg. throughput: 114.176382 GFLOPS
+
+===== guided =====
+Avg. time: 1.205092 sec
+Avg. throughput: 114.048527 GFLOPS
+
+
+## (N, M, K) = (6329, 3217, 5021)
+## Number of theads: 32
+## chunk_size: 미지정
+===== static =====
+Calculating...(iter=0) 1.188530 sec
+Calculating...(iter=1) 1.151937 sec
+Calculating...(iter=2) 1.082922 sec
+Calculating...(iter=3) 1.040922 sec
+Calculating...(iter=4) 0.965611 sec
+Calculating...(iter=5) 0.896716 sec
+Calculating...(iter=6) 0.907400 sec
+Calculating...(iter=7) 0.998290 sec
+Calculating...(iter=8) 0.976840 sec
+Calculating...(iter=9) 0.852041 sec
+Calculating...(iter=10) 0.846168 sec
+Calculating...(iter=11) 0.845979 sec
+Calculating...(iter=12) 0.846033 sec
+Calculating...(iter=13) 0.845604 sec
+Calculating...(iter=14) 0.845544 sec
+Calculating...(iter=15) 0.845871 sec
+Calculating...(iter=16) 0.845271 sec
+Calculating...(iter=17) 0.845280 sec
+Calculating...(iter=18) 0.845866 sec
+Calculating...(iter=19) 0.866015 sec
+Validating...
+Result: VALID
+Avg. time: 0.926942 sec
+Avg. throughput: 220.573731 GFLOPS
+
+===== dynamic =====
+Calculating...(iter=0) 1.168922 sec
+Calculating...(iter=1) 1.013743 sec
+Calculating...(iter=2) 0.961985 sec
+Calculating...(iter=3) 0.860034 sec
+Calculating...(iter=4) 0.853419 sec
+Calculating...(iter=5) 0.863535 sec
+Calculating...(iter=6) 0.842318 sec
+Calculating...(iter=7) 0.926018 sec
+Calculating...(iter=8) 0.853530 sec
+Calculating...(iter=9) 0.840094 sec
+Calculating...(iter=10) 0.876345 sec
+Calculating...(iter=11) 0.846598 sec
+Calculating...(iter=12) 0.882639 sec
+Calculating...(iter=13) 0.884331 sec
+Calculating...(iter=14) 0.882612 sec
+Calculating...(iter=15) 0.857433 sec
+Calculating...(iter=16) 0.883832 sec
+Calculating...(iter=17) 0.882855 sec
+Calculating...(iter=18) 0.882634 sec
+Calculating...(iter=19) 0.877210 sec
+Validating...
+Result: VALID
+Avg. time: 0.897004 sec
+Avg. throughput: 227.935415 GFLOPS
+
+===== guided =====
+Calculating...(iter=0) 1.123348 sec
+Calculating...(iter=1) 1.071540 sec
+Calculating...(iter=2) 1.091702 sec
+Calculating...(iter=3) 0.864145 sec
+Calculating...(iter=4) 0.866963 sec
+Calculating...(iter=5) 1.119121 sec
+Calculating...(iter=6) 1.025376 sec
+Calculating...(iter=7) 0.850378 sec
+Calculating...(iter=8) 0.864122 sec
+Calculating...(iter=9) 0.885812 sec
+Calculating...(iter=10) 1.024304 sec
+Calculating...(iter=11) 0.865470 sec
+Calculating...(iter=12) 0.880134 sec
+Calculating...(iter=13) 0.871165 sec
+Calculating...(iter=14) 0.869436 sec
+Calculating...(iter=15) 0.930163 sec
+Calculating...(iter=16) 0.856802 sec
+Calculating...(iter=17) 0.904392 sec
+Calculating...(iter=18) 0.987880 sec
+Calculating...(iter=19) 0.960062 sec
+Validating...
+Result: VALID
+Avg. time: 0.945616 sec
+Avg. throughput: 216.217914 GFLOPS

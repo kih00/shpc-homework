@@ -7,9 +7,9 @@
 #include <stdlib.h>
 
 void matmul(float *A, float *B, float *C, int M, int N, int K,
-            int num_threads) {
+            int num_threads, int block_size) {
 
-  const int BLOCK_SIZE = 128;
+  const int BLOCK_SIZE = block_size;
 
   #pragma omp parallel for num_threads(num_threads) schedule(guided)
   for (int its = 0; its < M; its += BLOCK_SIZE) {

@@ -1,0 +1,310 @@
+make: Nothing to be done for 'all'.
+Options:
+  Block size: 16
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.851810 sec
+Avg. throughput: 161.349331 GFLOPS
+================================
+Options:
+  Block size: 32
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.621751 sec
+Avg. throughput: 221.051408 GFLOPS
+================================
+Options:
+  Block size: 48
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.617258 sec
+Avg. throughput: 222.660339 GFLOPS
+================================
+Options:
+  Block size: 64
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.424331 sec
+Avg. throughput: 323.895327 GFLOPS
+================================
+Options:
+  Block size: 80
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.449559 sec
+Avg. throughput: 305.719407 GFLOPS
+================================
+Options:
+  Block size: 96
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.471830 sec
+Avg. throughput: 291.289160 GFLOPS
+================================
+Options:
+  Block size: 112
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.556710 sec
+Avg. throughput: 246.876957 GFLOPS
+================================
+Options:
+  Block size: 128
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.565039 sec
+Avg. throughput: 243.237946 GFLOPS
+================================
+Options:
+  Block size: 144
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.691622 sec
+Avg. throughput: 198.719725 GFLOPS
+================================
+Options:
+  Block size: 160
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.646208 sec
+Avg. throughput: 212.685363 GFLOPS
+================================
+Options:
+  Block size: 176
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.557435 sec
+Avg. throughput: 246.555926 GFLOPS
+================================
+Options:
+  Block size: 192
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.710686 sec
+Avg. throughput: 193.389025 GFLOPS
+================================
+Options:
+  Block size: 208
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.872418 sec
+Avg. throughput: 157.537954 GFLOPS
+================================
+Options:
+  Block size: 224
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.664888 sec
+Avg. throughput: 206.710059 GFLOPS
+================================
+Options:
+  Block size: 240
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.733387 sec
+Avg. throughput: 187.403072 GFLOPS
+================================
+Options:
+  Block size: 256
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 0.795419 sec
+Avg. throughput: 172.788190 GFLOPS
+================================
+Options:
+  Block size: 320
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 1.149646 sec
+Avg. throughput: 119.548979 GFLOPS
+================================
+Options:
+  Block size: 384
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 1.528723 sec
+Avg. throughput: 89.904399 GFLOPS
+================================
+Options:
+  Block size: 448
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 1.858979 sec
+Avg. throughput: 73.932497 GFLOPS
+================================
+Options:
+  Block size: 512
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 2.112045 sec
+Avg. throughput: 65.073877 GFLOPS
+================================
+Options:
+  Block size: 576
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 2.246732 sec
+Avg. throughput: 61.172841 GFLOPS
+================================
+Options:
+  Block size: 640
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 2.423818 sec
+Avg. throughput: 56.703485 GFLOPS
+================================
+Options:
+  Block size: 704
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 2.528415 sec
+Avg. throughput: 54.357749 GFLOPS
+================================
+Options:
+  Block size: 768
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 2.585042 sec
+Avg. throughput: 53.167010 GFLOPS
+================================
+Options:
+  Block size: 832
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 3.093950 sec
+Avg. throughput: 44.421840 GFLOPS
+================================
+Options:
+  Block size: 896
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 3.073455 sec
+Avg. throughput: 44.718056 GFLOPS
+================================
+Options:
+  Block size: 960
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 3.105811 sec
+Avg. throughput: 44.252197 GFLOPS
+================================
+Options:
+  Block size: 1024
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 3.214441 sec
+Avg. throughput: 42.756713 GFLOPS
+================================
+Options:
+  Block size: 1152
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 3.789525 sec
+Avg. throughput: 36.268125 GFLOPS
+================================
+Options:
+  Block size: 1280
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 4.470028 sec
+Avg. throughput: 30.746774 GFLOPS
+================================
+Options:
+  Block size: 1408
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 4.392641 sec
+Avg. throughput: 31.288458 GFLOPS
+================================
+Options:
+  Block size: 1536
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 5.032607 sec
+Avg. throughput: 27.309694 GFLOPS
+================================
+Options:
+  Block size: 1664
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 5.121067 sec
+Avg. throughput: 26.837954 GFLOPS
+================================
+Options:
+  Block size: 1792
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 5.974693 sec
+Avg. throughput: 23.003517 GFLOPS
+================================
+Options:
+  Block size: 1920
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 6.601091 sec
+Avg. throughput: 20.820641 GFLOPS
+================================
+Options:
+  Block size: 2048
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 7.528862 sec
+Avg. throughput: 18.254944 GFLOPS
+================================
+Options:
+  Block size: 2176
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 8.213130 sec
+Avg. throughput: 16.734052 GFLOPS
+================================
+Options:
+  Block size: 2304
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 9.414263 sec
+Avg. throughput: 14.599013 GFLOPS
+================================
+ANALYZING DONE!
+
+[결과]
+block size = [16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048, 2176, 2304]
+throughput = [161.349331, 221.051408, 222.660339, 323.895327, 305.719407, 291.28916, 246.876957, 243.237946, 198.719725, 212.685363, 246.555926, 193.389025, 157.537954, 206.710059, 187.403072, 172.78819, 119.548979, 89.904399, 73.932497, 65.073877, 61.172841, 56.703485, 54.357749, 53.16701, 44.42184, 44.718056, 44.252197, 42.756713, 36.268125, 30.746774, 31.288458, 27.309694, 26.837954, 23.003517, 20.820641, 18.254944, 16.734052, 14.599013]

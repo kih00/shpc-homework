@@ -1,0 +1,481 @@
+make: Nothing to be done for 'all'.
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 16
+Initializing... done!
+Calculating...(iter=0) 0.974634 sec
+Calculating...(iter=1) 0.767472 sec
+Calculating...(iter=2) 0.765099 sec
+Validating...
+Result: VALID
+Avg. time: 0.835735 sec
+Avg. throughput: 164.452832 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 32
+Initializing... done!
+Calculating...(iter=0) 0.663970 sec
+Calculating...(iter=1) 0.651953 sec
+Calculating...(iter=2) 0.532254 sec
+Validating...
+Result: VALID
+Avg. time: 0.616059 sec
+Avg. throughput: 223.093918 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 48
+Initializing... done!
+Calculating...(iter=0) 0.613840 sec
+Calculating...(iter=1) 0.619164 sec
+Calculating...(iter=2) 0.621903 sec
+Validating...
+Result: VALID
+Avg. time: 0.618302 sec
+Avg. throughput: 222.284358 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 64
+Initializing... done!
+Calculating...(iter=0) 0.401680 sec
+Calculating...(iter=1) 0.413637 sec
+Calculating...(iter=2) 0.454693 sec
+Validating...
+Result: VALID
+Avg. time: 0.423337 sec
+Avg. throughput: 324.656422 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 80
+Initializing... done!
+Calculating...(iter=0) 0.420075 sec
+Calculating...(iter=1) 0.444025 sec
+Calculating...(iter=2) 0.418973 sec
+Validating...
+Result: VALID
+Avg. time: 0.427691 sec
+Avg. throughput: 321.350923 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 96
+Initializing... done!
+Calculating...(iter=0) 0.465670 sec
+Calculating...(iter=1) 0.471242 sec
+Calculating...(iter=2) 0.465671 sec
+Validating...
+Result: VALID
+Avg. time: 0.467528 sec
+Avg. throughput: 293.969570 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 112
+Initializing... done!
+Calculating...(iter=0) 0.553047 sec
+Calculating...(iter=1) 0.561373 sec
+Calculating...(iter=2) 0.515163 sec
+Validating...
+Result: VALID
+Avg. time: 0.543194 sec
+Avg. throughput: 253.019936 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 128
+Initializing... done!
+Calculating...(iter=0) 0.746329 sec
+Calculating...(iter=1) 0.583974 sec
+Calculating...(iter=2) 0.501345 sec
+Validating...
+Result: VALID
+Avg. time: 0.610549 sec
+Avg. throughput: 225.107036 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 144
+Initializing... done!
+Calculating...(iter=0) 0.816182 sec
+Calculating...(iter=1) 0.688872 sec
+Calculating...(iter=2) 0.535403 sec
+Validating...
+Result: VALID
+Avg. time: 0.680152 sec
+Avg. throughput: 202.070868 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 160
+Initializing... done!
+Calculating...(iter=0) 0.628058 sec
+Calculating...(iter=1) 0.585520 sec
+Calculating...(iter=2) 0.558944 sec
+Validating...
+Result: VALID
+Avg. time: 0.590841 sec
+Avg. throughput: 232.615920 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 176
+Initializing... done!
+Calculating...(iter=0) 0.596818 sec
+Calculating...(iter=1) 0.667053 sec
+Calculating...(iter=2) 0.711671 sec
+Validating...
+Result: VALID
+Avg. time: 0.658514 sec
+Avg. throughput: 208.710776 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 192
+Initializing... done!
+Calculating...(iter=0) 0.628500 sec
+Calculating...(iter=1) 0.597111 sec
+Calculating...(iter=2) 0.717969 sec
+Validating...
+Result: VALID
+Avg. time: 0.647860 sec
+Avg. throughput: 212.142912 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 208
+Initializing... done!
+Calculating...(iter=0) 0.690925 sec
+Calculating...(iter=1) 0.596922 sec
+Calculating...(iter=2) 0.574081 sec
+Validating...
+Result: VALID
+Avg. time: 0.620642 sec
+Avg. throughput: 221.446329 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 224
+Initializing... done!
+Calculating...(iter=0) 0.658887 sec
+Calculating...(iter=1) 0.622130 sec
+Calculating...(iter=2) 0.633447 sec
+Validating...
+Result: VALID
+Avg. time: 0.638155 sec
+Avg. throughput: 215.369371 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 240
+Initializing... done!
+Calculating...(iter=0) 1.210143 sec
+Calculating...(iter=1) 1.221622 sec
+Calculating...(iter=2) 1.263500 sec
+Validating...
+Result: VALID
+Avg. time: 1.231755 sec
+Avg. throughput: 111.579758 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 256
+Initializing... done!
+Calculating...(iter=0) 0.987207 sec
+Calculating...(iter=1) 0.960633 sec
+Calculating...(iter=2) 0.943252 sec
+Validating...
+Result: VALID
+Avg. time: 0.963697 sec
+Avg. throughput: 142.616285 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 320
+Initializing... done!
+Calculating...(iter=0) 1.180177 sec
+Calculating...(iter=1) 1.253935 sec
+Calculating...(iter=2) 1.205039 sec
+Validating...
+Result: VALID
+Avg. time: 1.213050 sec
+Avg. throughput: 113.300278 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 384
+Initializing... done!
+Calculating...(iter=0) 1.468397 sec
+Calculating...(iter=1) 1.491719 sec
+Calculating...(iter=2) 1.580507 sec
+Validating...
+Result: VALID
+Avg. time: 1.513541 sec
+Avg. throughput: 90.806237 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 448
+Initializing... done!
+Calculating...(iter=0) 1.896058 sec
+Calculating...(iter=1) 1.956046 sec
+Calculating...(iter=2) 1.861447 sec
+Validating...
+Result: VALID
+Avg. time: 1.904517 sec
+Avg. throughput: 72.164738 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 512
+Initializing... done!
+Calculating...(iter=0) 2.104817 sec
+Calculating...(iter=1) 2.197413 sec
+Calculating...(iter=2) 2.155309 sec
+Validating...
+Result: VALID
+Avg. time: 2.152513 sec
+Avg. throughput: 63.850461 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 576
+Initializing... done!
+Calculating...(iter=0) 2.281179 sec
+Calculating...(iter=1) 2.172059 sec
+Calculating...(iter=2) 2.098061 sec
+Validating...
+Result: VALID
+Avg. time: 2.183766 sec
+Avg. throughput: 62.936666 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 640
+Initializing... done!
+Calculating...(iter=0) 2.075359 sec
+Calculating...(iter=1) 2.343296 sec
+Calculating...(iter=2) 2.416224 sec
+Validating...
+Result: VALID
+Avg. time: 2.278293 sec
+Avg. throughput: 60.325406 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 704
+Initializing... done!
+Calculating...(iter=0) 2.572190 sec
+Calculating...(iter=1) 2.391548 sec
+Calculating...(iter=2) 2.548976 sec
+Validating...
+Result: VALID
+Avg. time: 2.504238 sec
+Avg. throughput: 54.882542 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 768
+Initializing... done!
+Calculating...(iter=0) 2.741738 sec
+Calculating...(iter=1) 2.670480 sec
+Calculating...(iter=2) 2.633090 sec
+Validating...
+Result: VALID
+Avg. time: 2.681769 sec
+Avg. throughput: 51.249355 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 832
+Initializing... done!
+Calculating...(iter=0) 3.040043 sec
+Calculating...(iter=1) 3.070500 sec
+Calculating...(iter=2) 3.047495 sec
+Validating...
+Result: VALID
+Avg. time: 3.052679 sec
+Avg. throughput: 45.022403 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 896
+Initializing... done!
+Calculating...(iter=0) 3.159655 sec
+Calculating...(iter=1) 2.172784 sec
+Calculating...(iter=2) 2.453816 sec
+Validating...
+Result: VALID
+Avg. time: 2.595418 sec
+Avg. throughput: 52.954453 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 960
+Initializing... done!
+Calculating...(iter=0) 3.145330 sec
+Calculating...(iter=1) 3.153641 sec
+Calculating...(iter=2) 2.712661 sec
+Validating...
+Result: VALID
+Avg. time: 3.003877 sec
+Avg. throughput: 45.753852 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 1024
+Initializing... done!
+Calculating...(iter=0) 3.213932 sec
+Calculating...(iter=1) 3.263376 sec
+Calculating...(iter=2) 3.170394 sec
+Validating...
+Result: VALID
+Avg. time: 3.215901 sec
+Avg. throughput: 42.737315 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 1152
+Initializing... done!
+Calculating...(iter=0) 3.978710 sec
+Calculating...(iter=1) 3.981173 sec
+Calculating...(iter=2) 4.057469 sec
+Validating...
+Result: VALID
+Avg. time: 4.005784 sec
+Avg. throughput: 34.310125 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 1280
+Initializing... done!
+Calculating...(iter=0) 4.585887 sec
+Calculating...(iter=1) 3.900038 sec
+Calculating...(iter=2) 4.629371 sec
+Validating...
+Result: VALID
+Avg. time: 4.371766 sec
+Avg. throughput: 31.437860 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 1408
+Initializing... done!
+Calculating...(iter=0) 4.808281 sec
+Calculating...(iter=1) 4.926463 sec
+Calculating...(iter=2) 4.627453 sec
+Validating...
+Result: VALID
+Avg. time: 4.787399 sec
+Avg. throughput: 28.708481 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 1536
+Initializing... done!
+Calculating...(iter=0) 4.104645 sec
+Calculating...(iter=1) 4.707016 sec
+Calculating...(iter=2) 4.629208 sec
+Validating...
+Result: VALID
+Avg. time: 4.480290 sec
+Avg. throughput: 30.676355 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 1664
+Initializing... done!
+Calculating...(iter=0) 5.703031 sec
+Calculating...(iter=1) 5.463964 sec
+Calculating...(iter=2) 5.572807 sec
+Validating...
+Result: VALID
+Avg. time: 5.579934 sec
+Avg. throughput: 24.630929 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 1792
+Initializing... done!
+Calculating...(iter=0) 6.585733 sec
+Calculating...(iter=1) 6.211220 sec
+Calculating...(iter=2) 6.341440 sec
+Validating...
+Result: VALID
+Avg. time: 6.379464 sec
+Avg. throughput: 21.543964 GFLOPS
+================================
+Options:
+  Problem size: M = 4096, N = 4096, K = 4096
+  Number of threads: 64
+  Block size: 1920
+Initializing... done!
+Calculating...(iter=0) 6.760008 sec
+Calculating...(iter=1) 6.513337 sec
+Calculating...(iter=2) 6.557641 sec
+Validating...
+Result: VALID
+Avg. time: 6.610329 sec
+Avg. throughput: 20.791546 GFLOPS
+=========================================
+Options:
+  Block size: 2048
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 7.528862 sec
+Avg. throughput: 18.254944 GFLOPS
+================================
+Options:
+  Block size: 2176
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 8.213130 sec
+Avg. throughput: 16.734052 GFLOPS
+================================
+Options:
+  Block size: 2304
+Initializing... done!
+Validating...
+Result: VALID
+Avg. time: 9.414263 sec
+Avg. throughput: 14.599013 GFLOPS
+================================
+ANALYZING DONE!
