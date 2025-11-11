@@ -18,15 +18,19 @@ __kernel void sgemm(__global float *A, __global float *B, __global float *C, int
   for (int t = 0; t < K; t += TS) {
       
     // A_local[ii][jj] = A[i][t + jj]
-    if (i < M && t + jj < K) {
-      A_local[ii][jj] = A[i * K + t + jj];
+    int ii_start_A = i;
+    int jj_start_A = t + jj;
+    if (ii_start_A < M && jj_start_A < K) {
+      A_local[ii][jj] = A[ii_start_A * K + jj_start_A];
     } else {
       A_local[ii][jj] = 0.0f;
     }
 
     // B_local[ii][jj] = B[t + ii][j]
-    if (t + ii < K && j < N) {
-      B_local[ii][jj] = B[(t + ii) * N + j];
+    int ii_start_B = t + ii;
+    int jj_start_B = j;
+    if (ii_start_B < K && jj_start_B < N) {
+      B_local[ii][jj] = B[ii_start_B * N + jj_start_B];
     } else {
       B_local[ii][jj] = 0.0f;
     }

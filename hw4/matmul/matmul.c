@@ -5,6 +5,7 @@
 #include <CL/cl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 #define CHECK_ERROR(err)                                                       \
   if (err != CL_SUCCESS) {                                                     \
@@ -21,8 +22,56 @@ static cl_program program;
 static cl_kernel kernel;
 static cl_mem a_d, b_d, c_d;
 
+static bool data_transferred = false;
+
 void matmul(const float *A, const float *B, float *C, int M, int N, int K) {
   // TODO: FILL_IN_HERE
+  // 1. set the arguments of the kernel
+  err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &a_d);
+  CHECK_ERROR(err);
+  err = clSetKernelArg(kernel, 1, sizeof(cl_mem), &b_d);
+  CHECK_ERROR(err);
+  err = clSetKernelArg(kernel, 2, sizeof(cl_mem), &c_d);
+  CHECK_ERROR(err);
+  err = clSetKernelArg(kernel, 3, sizeof(int), &M);
+  CHECK_ERROR(err);
+  err = clSetKernelArg(kernel, 4, sizeof(int), &N);
+  CHECK_ERROR(err);
+  err = clSetKernelArg(kernel, 5, sizeof(int), &K);
+  CHECK_ERROR(err);
+
+  size_t sizeA = M * K * sizeof(float);
+  size_t sizeB = K * N * sizeof(float);
+  size_t sizeC = M * N * sizeof(float);
+
+  // 2. copy the input matrices to the corresponding buffers
+  if (!data_transferred) {
+    err = clEnqueueWriteBuffer(queue, a_d, CL_FALSE, 0,
+                               sizeA, A, 0, NULL, NULL);
+    CHECK_ERROR(err);
+
+    err = clEnqueueWriteBuffer(queue, b_d, CL_FALSE, 0,
+                               sizeB, B, 0, NULL, NULL);
+    CHECK_ERROR(err);
+    data_transferred = true;
+  }
+
+  // 3. execute the kernel
+  // kernel.cl의 TS와 일치해야 함
+  const size_t TS = 32;
+  
+  // global[2] = { N, M };
+  size_t global[2] = { (N+TS-1) / TS * TS, (M+TS-1) / TS * TS };
+  size_t local[2] = { TS, TS };
+
+  err = clEnqueueNDRangeKernel(queue, kernel, 2, NULL,
+                               global, local, 0, NULL, NULL);
+  CHECK_ERROR(err);
+
+  // 4. copy the result from buffer to host
+  err = clEnqueueReadBuffer(queue, c_d, CL_TRUE, 0,
+                            sizeC, C, 0, NULL, NULL);
+  CHECK_ERROR(err);
 }
 
 static void print_platform_info(cl_platform_id platform) {
@@ -122,4 +171,12 @@ void matmul_initialize(int M, int N, int K) {
   CHECK_ERROR(err);
 }
 
-void matmul_finalize() {}
+void matmul_finalize() {
+  clReleaseMemObject(a_d);
+  clReleaseMemObject(b_d);
+  clReleaseMemObject(c_d);
+  clReleaseKernel(kernel);
+  clReleaseProgram(program);
+  clReleaseCommandQueue(queue);
+  clReleaseContext(context);
+}
