@@ -301,12 +301,12 @@ SparseMoeBlock::SparseMoeBlock(int layer_idx) {
     }
     
     // Initialize d_count_tensor_ (1 element)
-    d_count_tensor_ = Tensor({1});
+    d_count_tensor_ = Tensor({1}); // TODO: undefined identifier
 }
 
 void SparseMoeBlock::route_tokens(const Tensor& router_logits, 
                                    Tensor& top_k_indices,
-                                   Tensor& top_k_weights) {
+                                   Tensor& top_k_weights) { // TODO: different signature from header
     // router_logits: (batch * seq_len, num_experts)
     size_t num_tokens = router_logits.size(0);
     
@@ -337,22 +337,22 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
     Tensor x_flat = x.view({num_tokens, hidden_size});
     
     // Compute router logits
-    router_logits_.resize({num_tokens, NUM_EXPERTS});
+    router_logits_.resize({num_tokens, NUM_EXPERTS}); // TODO: undefined identifier
     tensor_ops::matmul_transposed(x_flat, gate_, router_logits_);
     
     // Route tokens
-    route_tokens(router_logits_, top_k_indices_, top_k_weights_);
+    route_tokens(router_logits_, top_k_indices_, top_k_weights_); // TODO: undefined identifier
     
     // Initialize output
     y = Tensor({batch, seq_len, hidden_size});
     y.zero();
     
     // Process each expert
-    int* d_count = (int*)d_count_tensor_.data();
+    int* d_count = (int*)d_count_tensor_.data(); // TODO: undefined identifier
     
     // Temporary buffers for gather/scatter
-    expert_input_.resize({num_tokens, hidden_size});
-    expert_output_.resize({num_tokens, hidden_size});
+    expert_input_.resize({num_tokens, hidden_size}); // TODO: undefined identifier
+    expert_output_.resize({num_tokens, hidden_size}); // TODO: undefined identifier
     indices_map_.resize({num_tokens}); // Store original indices, treat as float* but use as int*
     
     for (size_t e = 0; e < NUM_EXPERTS; e++) {
@@ -450,14 +450,14 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
     Tensor v_reshaped = v_proj_out_.view({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
     
     // Apply layernorm to Q and K
-    q_normed_.resize({batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM});
+    q_normed_.resize({batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM}); // TODO: undefined identifier
     k_normed_.resize({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
     q_layernorm_->forward(q_reshaped, q_normed_);
     k_layernorm_->forward(k_reshaped, k_normed_);
     
     // Transpose to (batch, num_heads, seq_len, head_dim) for attention
     // Use kernel
-    q_.resize({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
+    q_.resize({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM}); // TODO: undefined identifier
     k_.resize({batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
     v_.resize({batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
     
@@ -475,37 +475,37 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
     tensor_ops::apply_rotary_pos_emb(q_, k_, cos, sin);
     
     // Repeat K, V for GQA
-    k_repeated_.resize({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
+    k_repeated_.resize({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM}); // TODO: undefined identifier
     v_repeated_.resize({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
     tensor_ops::repeat_kv(k_, NUM_KEY_VALUE_GROUPS, k_repeated_);
     tensor_ops::repeat_kv(v_, NUM_KEY_VALUE_GROUPS, v_repeated_);
     
     // Compute attention: Q @ K^T
     float scale = 1.0f / std::sqrt((float)HEAD_DIM);
-    scores_.resize({batch, NUM_ATTENTION_HEADS, seq_len, seq_len});
+    scores_.resize({batch, NUM_ATTENTION_HEADS, seq_len, seq_len}); // TODO: undefined identifier
     
     int blocks_scores = (batch * NUM_ATTENTION_HEADS * seq_len * seq_len + threads - 1) / threads;
-    batched_matmul_qk_kernel<<<blocks_scores, threads>>>(q_.data(), k_repeated_.data(), scores_.data(), batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM, scale);
+    batched_matmul_qk_kernel<<<blocks_scores, threads>>>(q_.data(), k_repeated_.data(), scores_.data(), batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM, scale); // TODO: undefined identifier
     
     // Apply causal mask
-    causal_mask_kernel<<<blocks_scores, threads>>>(scores_.data(), batch, NUM_ATTENTION_HEADS, seq_len);
+    causal_mask_kernel<<<blocks_scores, threads>>>(scores_.data(), batch, NUM_ATTENTION_HEADS, seq_len); // TODO: undefined identifier
     
     // Softmax
-    attn_weights_.resize({batch, NUM_ATTENTION_HEADS, seq_len, seq_len});
+    attn_weights_.resize({batch, NUM_ATTENTION_HEADS, seq_len, seq_len}); // TODO: undefined identifier
     tensor_ops::softmax(scores_, attn_weights_, -1);
     
     // Multiply by V: attn_weights @ V
-    attn_output_.resize({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
+    attn_output_.resize({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM}); // TODO: undefined identifier
     int blocks_out = (batch * NUM_ATTENTION_HEADS * seq_len * HEAD_DIM + threads - 1) / threads;
-    batched_matmul_sv_kernel<<<blocks_out, threads>>>(attn_weights_.data(), v_repeated_.data(), attn_output_.data(), batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM);
+    batched_matmul_sv_kernel<<<blocks_out, threads>>>(attn_weights_.data(), v_repeated_.data(), attn_output_.data(), batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM); // TODO: undefined identifier
     
     // Transpose back: (batch, num_heads, seq_len, head_dim) -> (batch, seq_len, num_heads, head_dim)
     // And flatten to (batch * seq_len, hidden_size)
     // We can transpose directly to (batch, seq_len, hidden_size) if we treat H*D as contiguous
-    attn_flat_.resize({batch * seq_len, hidden_size});
+    attn_flat_.resize({batch * seq_len, hidden_size}); // TODO: undefined identifier
     transpose_BHSD_BSHD_kernel<<<blocks_out, threads>>>(attn_output_.data(), attn_flat_.data(), batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM);
     
-    output_flat_.resize({batch * seq_len, hidden_size});
+    output_flat_.resize({batch * seq_len, hidden_size}); // TODO: undefined identifier
     tensor_ops::matmul_transposed(attn_flat_, o_proj_, output_flat_);
     
     output_flat_.reshape({batch, seq_len, hidden_size});
@@ -558,7 +558,7 @@ void ShortConv::forward(const Tensor& x, Tensor& y) {
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
     
     // in_proj: (batch*seq_len, hidden_size) @ (3*hidden_size, hidden_size)^T -> (batch*seq_len, 3*hidden_size)
-    in_proj_out_.resize({batch * seq_len, 3 * hidden_size});
+    in_proj_out_.resize({batch * seq_len, 3 * hidden_size}); // TODO: undefined identifier
     tensor_ops::matmul_transposed(x_flat, in_proj_weight_, in_proj_out_);
     
     // Add bias if present
@@ -569,7 +569,7 @@ void ShortConv::forward(const Tensor& x, Tensor& y) {
     // Reshape to (batch, seq_len, 3*hidden_size)
     // Then Transpose to (batch, 3*hidden_size, seq_len) -> (B, C, S)
     // Use kernel
-    BCx_.resize({batch, 3 * hidden_size, seq_len});
+    BCx_.resize({batch, 3 * hidden_size, seq_len}); // TODO: undefined identifier
     int threads = 256;
     int blocks = (batch * 3 * hidden_size * seq_len + threads - 1) / threads;
     transpose_BSC_BCS_kernel<<<blocks, threads>>>(in_proj_out_.data(), BCx_.data(), batch, seq_len, 3 * hidden_size);
@@ -582,7 +582,7 @@ void ShortConv::forward(const Tensor& x, Tensor& y) {
     //   h=2H..3H-1: x_gate
     // We copy these contiguous blocks to separate tensors.
     
-    B_.resize({batch, hidden_size, seq_len});
+    B_.resize({batch, hidden_size, seq_len}); // TODO: undefined identifier
     C_.resize({batch, hidden_size, seq_len});
     x_gate_.resize({batch, hidden_size, seq_len});
     
@@ -605,26 +605,26 @@ void ShortConv::forward(const Tensor& x, Tensor& y) {
     }
     
     // Bx = B * x_gate (element-wise)
-    Bx_.resize({batch, hidden_size, seq_len});
+    Bx_.resize({batch, hidden_size, seq_len}); // TODO: undefined identifier
     tensor_ops::mul(B_, x_gate_, Bx_);
     
     // Apply causal conv1d on Bx
-    conv_out_.resize({batch, hidden_size, seq_len});
+    conv_out_.resize({batch, hidden_size, seq_len}); // TODO: undefined identifier
     tensor_ops::causal_conv1d(Bx_, conv_weight_, USE_CONV_BIAS ? &conv_bias_ : nullptr, conv_out_);
     
     // y_pre = C * conv_out (element-wise)
-    y_pre_.resize({batch, hidden_size, seq_len});
+    y_pre_.resize({batch, hidden_size, seq_len}); // TODO: undefined identifier
     tensor_ops::mul(C_, conv_out_, y_pre_);
     
     // Transpose back: (batch, hidden_size, seq_len) -> (batch, seq_len, hidden_size)
-    y_pre_transposed_.resize({batch, seq_len, hidden_size});
+    y_pre_transposed_.resize({batch, seq_len, hidden_size}); // TODO: undefined identifier
     transpose_BCS_BSC_kernel<<<blocks, threads>>>(y_pre_.data(), y_pre_transposed_.data(), batch, hidden_size, seq_len);
     
     // out_proj
     // Copy transposed data to flat buffer
-    y_pre_flat_.resize({batch * seq_len, hidden_size});
+    y_pre_flat_.resize({batch * seq_len, hidden_size}); // TODO: undefined identifier
     
-    y_flat_.resize({batch * seq_len, hidden_size});
+    y_flat_.resize({batch * seq_len, hidden_size}); // TODO: undefined identifier
     tensor_ops::matmul_transposed(y_pre_transposed_.view({batch * seq_len, hidden_size}), out_proj_weight_, y_flat_);
     
     // Add bias if present
@@ -749,9 +749,9 @@ void LFM2Model::load_layers() {
     }
 }
 
+// TODO: delete all below and re-implement from original baseline
+
 void LFM2Model::load_output_layers() {
-// LFM2Model implementation
-LFM2Model::LFM2Model() {
     // Load embedding
     embedding_ = Tensor::load_from_file("model.embed_tokens.weight");
     

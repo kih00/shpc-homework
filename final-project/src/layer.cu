@@ -10,7 +10,7 @@
 // CUDA Kernels
 // ============================================================================
 
-__global__ void matmul_kernel(float *A, float *B, float *C, int M, int N, int K) {
+__global__ void matmul_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (row < M && col < N) {
@@ -20,7 +20,7 @@ __global__ void matmul_kernel(float *A, float *B, float *C, int M, int N, int K)
     }
 }
 
-__global__ void matmul_transposed_kernel(float *A, float *B, float *C, int M, int N, int K) {
+__global__ void matmul_transposed_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
     // C = A @ B^T
     // A: (M, K), B: (N, K), C: (M, N)
     int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -32,35 +32,43 @@ __global__ void matmul_transposed_kernel(float *A, float *B, float *C, int M, in
     }
 }
 
-__global__ void add_kernel(float *a, float *b, float *c, int n) {
+__global__ void add_kernel(const float *a, const float *b, float *c, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         c[idx] = a[idx] + b[idx];
     }
 }
 
-__global__ void add_scalar_kernel(float *a, float b, float *c, int n) {
+__global__ void add_scalar_kernel(const float *a, const float b, float *c, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         c[idx] = a[idx] + b;
     }
 }
 
-__global__ void mul_kernel(float *a, float *b, float *c, int n) {
+__global__ void add_bias_kernel(float* a, const float* bias, int rows, int cols) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < rows * cols) {
+        int col = idx % cols;
+        a[idx] += bias[col];
+    }
+}
+
+__global__ void mul_kernel(const float *a, const float *b, float *c, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         c[idx] = a[idx] * b[idx];
     }
 }
 
-__global__ void mul_scalar_kernel(float *a, float b, float *c, int n) {
+__global__ void mul_scalar_kernel(const float *a, const float b, float *c, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         c[idx] = a[idx] * b;
     }
 }
 
-__global__ void silu_kernel(float *x, float *y, int n) {
+__global__ void silu_kernel(const float *x, float *y, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float val = x[idx];
@@ -68,17 +76,17 @@ __global__ void silu_kernel(float *x, float *y, int n) {
     }
 }
 
-__global__ void sigmoid_kernel(float *x, float *y, int n) {
+__global__ void sigmoid_kernel(const float *x, float *y, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         y[idx] = 1.0f / (1.0f + expf(-x[idx]));
     }
 }
 
-__global__ void softmax_kernel(float *x, float *y, int rows, int cols) {
+__global__ void softmax_kernel(const float *x, float *y, int rows, int cols) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row < rows) {
-        float max_val = -1e20f;
+        float max_val = x[row * cols];
         for (int j = 0; j < cols; ++j) {
             max_val = max(max_val, x[row * cols + j]);
         }
@@ -96,7 +104,7 @@ __global__ void softmax_kernel(float *x, float *y, int rows, int cols) {
     }
 }
 
-__global__ void rmsnorm_kernel(float *x, float *w, float *out, int rows, int dim) {
+__global__ void rms_norm_kernel(const float *x, const float *w, float *y, int rows, int dim) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row < rows) {
         float sum_sq = 0.0f;
@@ -106,75 +114,102 @@ __global__ void rmsnorm_kernel(float *x, float *w, float *out, int rows, int dim
         }
         float rms = rsqrtf(sum_sq / dim + 1e-6f);
         for (int i = 0; i < dim; ++i) {
-            out[row * dim + i] = x[row * dim + i] * rms * w[i];
+            y[row * dim + i] = x[row * dim + i] * rms * w[i];
         }
     }
 }
 
-__global__ void rope_kernel(float *data, float *cos, float *sin, int batch, int seq_len, int num_heads, int head_dim) {
+__global__ void rope_kernel(float *data, const float *cos, const float *sin, int batch, int seq_len, int num_heads, int head_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int half_dim = head_dim / 2;
     int total = batch * seq_len * num_heads * half_dim;
     if (idx < total) {
-        int hd = idx % half_dim;
+        int d = idx % half_dim;
         int rem = idx / half_dim;
         int h = rem % num_heads;
         rem /= num_heads;
         int s = rem % seq_len;
         int b = rem / seq_len;
         
-        int i1 = ((b * seq_len + s) * num_heads + h) * head_dim + hd;
+        int i1 = ((b * seq_len + s) * num_heads + h) * head_dim + d;
         int i2 = i1 + half_dim;
+        int deg1 = s * head_dim + d;
+        int deg2 = s * head_dim + d + half_dim;
         
         float x1 = data[i1];
         float x2 = data[i2];
-        float c = cos[s * head_dim + hd];
-        float sn = sin[s * head_dim + hd];
         
-        data[i1] = x1 * c - x2 * sn;
-        data[i2] = x2 * c + x1 * sn;
+        // x_rotated = x * cos + rotate_half(x) * sin (x can be q or k)
+        // rotate_half(x) = [-x2, x1]
+        data[i1] = x1 * cos[deg1] + (-x2) * sin[deg1];
+        data[i2] = x2 * cos[deg2] + x1 * sin[deg2];
     }
 }
 
-__global__ void repeat_kv_kernel(float *in, float *out, int B, int num_heads, int num_kv_heads, int S, int D) {
+__global__ void compute_rope_embeddings_kernel(float *cos, float *sin, int max_seq_len, int head_dim, float theta) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B * num_heads * S * D;
+    int total = max_seq_len * (head_dim / 2);
     if (idx < total) {
-        int d = idx % D;
-        int rem = idx / D;
-        int s = rem % S;
-        rem /= S;
-        int h = rem % num_heads;
+        int i = idx % (head_dim / 2);
+        int pos = idx / (head_dim / 2);
+        
+        float inv_freq = 1.0f / powf(theta, (2.0f * i) / head_dim);
+        float sina, cosa;
+        sincosf(pos * inv_freq, &sina, &cosa);
+        
+        cos[pos * head_dim + i] = cosa;
+        cos[pos * head_dim + i + head_dim / 2] = cosa;
+        sin[pos * head_dim + i] = sina;
+        sin[pos * head_dim + i + head_dim / 2] = sina;
+    }
+}
+
+__global__ void repeat_kv_kernel(const float *in, float *out, int batch, int num_heads,
+                                 int num_kv_heads, int seq_len, int head_dim) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * num_heads * seq_len * head_dim;
+    if (idx < total) {
+        int d = idx % head_dim;
+        int rem = idx / head_dim;
+        int s = rem % seq_len;
+        rem /= seq_len;
+        int out_h = rem % num_heads;
         int b = rem / num_heads;
         
-        int group = num_heads / num_kv_heads;
-        int kv_h = h / group;
+        int n_rep = num_heads / num_kv_heads;
+        int h = out_h / n_rep;
         
-        out[idx] = in[b * (num_kv_heads * S * D) + kv_h * (S * D) + s * D + d];
+        out[idx] = in[((b * num_kv_heads + h) * seq_len + s) * head_dim + d];
     }
 }
 
-__global__ void depthwise_conv1d_kernel(float *Bx, float *W, float *bias, float *ConvOut, int batch, int seq_len, int hidden_size, int kernel_size) {
+__global__ void causal_conv1d_kernel(const float *x, const float *w, const float *bias, float *y,
+                                     int batch, int seq_len, int channels, int kernel_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * hidden_size * seq_len;
+    int total = batch * channels * seq_len;
     if (idx < total) {
         int s = idx % seq_len;
         int rem = idx / seq_len;
-        int h = rem % hidden_size;
-        int b = rem / hidden_size;
+        int c = rem % channels;
+        int b = rem / channels;
         
-        int channel_base = b * (hidden_size * seq_len) + h * seq_len;
+        int bc = ((b * channels) + c) * seq_len;
+
+        // PyTorch Conv1d with padding=kernel_size-1:
+        // At output position s, uses input positions [s-(kernel_size-1), ..., s]
+        // kernel[0] multiplies input[s-(kernel_size-1)] (oldest)
+        // kernel[kernel_size-1] multiplies input[s] (current)
         float sum = 0.0f;
         for (int k = 0; k < kernel_size; ++k) {
-            int input_s = s - (kernel_size - 1) + k;
-            if (input_s >= 0 && input_s < seq_len) {
-                sum += Bx[channel_base + input_s] * W[h * kernel_size + k];
+            int input_pos = s - (kernel_size - 1) + k;
+            if (input_pos >= 0 && input_pos < seq_len) {
+                sum += x[bc + input_pos] * w[c * kernel_size + k];
             }
         }
         if (bias != nullptr) {
-            sum += bias[h];
+            sum += bias[c];
         }
-        ConvOut[idx] = sum;
+        y[idx] = sum;
     }
 }
 
@@ -182,13 +217,7 @@ __global__ void depthwise_conv1d_kernel(float *Bx, float *W, float *bias, float 
 // Tensor Operations - Basic operations on tensors
 // ============================================================================
 
-__global__ void add_bias_kernel(float* a, const float* bias, int rows, int cols) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < rows * cols) {
-        int col = idx % cols;
-        a[idx] += bias[col];
-    }
-}
+const int threads = 256;
 
 namespace tensor_ops {
 
@@ -218,14 +247,12 @@ void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c) {
 // Element-wise operations
 void add(const Tensor& a, const Tensor& b, Tensor& c) {
     int n = a.size();
-    int threads = 256;
     int blocks = (n + threads - 1) / threads;
     add_kernel<<<blocks, threads>>>(a.data(), b.data(), c.data(), n);
 }
 
 void add_scalar(const Tensor& a, float b, Tensor& c) {
     int n = a.size();
-    int threads = 256;
     int blocks = (n + threads - 1) / threads;
     add_scalar_kernel<<<blocks, threads>>>(a.data(), b, c.data(), n);
 }
@@ -235,14 +262,8 @@ void add_bias(const Tensor& a, const Tensor& bias, Tensor& c) {
     // Broadcast bias addition: c = a + bias
     
     int rows = a.size(0);
-    int cols = a.size(1); // Flattened if > 2D?
-    // If a is (B*S, H), bias is (H).
-    // If a is (B, S, H), bias is (H).
-    // We treat it as (rows, cols) where cols = last dim.
-    cols = a.shape().back();
-    rows = a.size() / cols;
+    int cols = a.size(1);
     
-    int threads = 256;
     int blocks = (rows * cols + threads - 1) / threads;
     
     // Ensure c contains a's data if not in-place
@@ -254,14 +275,12 @@ void add_bias(const Tensor& a, const Tensor& bias, Tensor& c) {
 
 void mul(const Tensor& a, const Tensor& b, Tensor& c) {
     int n = a.size();
-    int threads = 256;
     int blocks = (n + threads - 1) / threads;
     mul_kernel<<<blocks, threads>>>(a.data(), b.data(), c.data(), n);
 }
 
 void mul_scalar(const Tensor& a, float b, Tensor& c) {
     int n = a.size();
-    int threads = 256;
     int blocks = (n + threads - 1) / threads;
     mul_scalar_kernel<<<blocks, threads>>>(a.data(), b, c.data(), n);
 }
@@ -269,27 +288,24 @@ void mul_scalar(const Tensor& a, float b, Tensor& c) {
 // Activation functions
 void sigmoid(const Tensor& x, Tensor& y) {
     int n = x.size();
-    int threads = 256;
     int blocks = (n + threads - 1) / threads;
     sigmoid_kernel<<<blocks, threads>>>(x.data(), y.data(), n);
 }
 
 void silu(const Tensor& x, Tensor& y) {
     int n = x.size();
-    int threads = 256;
     int blocks = (n + threads - 1) / threads;
     silu_kernel<<<blocks, threads>>>(x.data(), y.data(), n);
 }
 
 void softmax(const Tensor& x, Tensor& y, int dim) {
-    // Assume dim=-1
+    // For simplicity, assume dim=-1 (last dimension)
     int outer_size = 1;
     for (size_t i = 0; i < x.ndim() - 1; i++) {
         outer_size *= x.size(i);
     }
     int inner_size = x.size(-1);
     
-    int threads = 256;
     int blocks = (outer_size + threads - 1) / threads;
     int blocks = (outer_size + threads - 1) / threads;
     // Naive softmax kernel (one thread per row)
@@ -304,54 +320,45 @@ void rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& y) {
     }
     int hidden_size = x.size(-1);
     
-    int threads = 256;
     int blocks = (outer_size + threads - 1) / threads;
-    rmsnorm_kernel<<<blocks, threads>>>(x.data(), weight.data(), y.data(), outer_size, hidden_size);
+    rms_norm_kernel<<<blocks, threads>>>(x.data(), weight.data(), y.data(),
+                                         outer_size, hidden_size);
 }
 
 // RoPE operations
 void compute_rope_embeddings(size_t head_dim, size_t max_seq_len, float theta,
                              Tensor& cos, Tensor& sin) {
-    // Compute on Host and copy to Device
-    
-    std::vector<float> h_cos(max_seq_len * head_dim);
-    std::vector<float> h_sin(max_seq_len * head_dim);
-    
-    std::vector<float> inv_freq(head_dim / 2);
-    for (size_t i = 0; i < head_dim / 2; i++) {
-        inv_freq[i] = 1.0f / std::pow(theta, (float)(2 * i) / head_dim);
-    }
-    
-    for (size_t pos = 0; pos < max_seq_len; pos++) {
-        for (size_t i = 0; i < head_dim / 2; i++) {
-            float angle = pos * inv_freq[i];
-            h_cos[pos * head_dim + i] = std::cos(angle);
-            h_cos[pos * head_dim + i + head_dim / 2] = std::cos(angle);
-            h_sin[pos * head_dim + i] = std::sin(angle);
-            h_sin[pos * head_dim + i + head_dim / 2] = std::sin(angle);
-        }
-    }
-    
-    cudaMemcpy(cos.data(), h_cos.data(), h_cos.size() * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(sin.data(), h_sin.data(), h_sin.size() * sizeof(float), cudaMemcpyHostToDevice);
+    int outer_size = max_seq_len * (head_dim / 2);
+    int blocks = (outer_size + threads - 1) / threads;
+
+    compute_rope_embeddings_kernel<<<blocks, threads>>>(cos.data(), sin.data(),
+                                                        max_seq_len, head_dim, theta);
 }
 
 void apply_rotary_pos_emb(Tensor& q, Tensor& k, const Tensor& cos, const Tensor& sin) {
-    int batch = q.size(0);
-    int num_q_heads = q.size(1);
-    int num_kv_heads = k.size(1);
-    int seq_len = q.size(2);
-    int head_dim = q.size(3);
+    // q: (batch, num_q_heads, seq_len, head_dim)
+    // k: (batch, num_kv_heads, seq_len, head_dim)
+    // cos, sin: (seq_len, head_dim)
+    // 
+    // Apply rotation: q_embed = (q * cos) + (rotate_half(q) * sin)
+    // rotate_half: concat([-x2, x1]) where x1=x[..., :head_dim/2], x2=x[..., head_dim/2:]
     
-    int total_q = batch * seq_len * num_q_heads;
-    int total_k = batch * seq_len * num_kv_heads;
+    size_t batch = q.size(0);
+    size_t num_q_heads = q.size(1);
+    size_t num_kv_heads = k.size(1);
+    size_t seq_len = q.size(2);
+    size_t head_dim = q.size(3);
     
-    int threads = 256;
+    size_t total_q = batch * seq_len * num_q_heads;
+    size_t total_k = batch * seq_len * num_kv_heads;
+    
     int blocks_q = (total_q * (head_dim/2) + threads - 1) / threads;
     int blocks_k = (total_k * (head_dim/2) + threads - 1) / threads;
     
-    rope_kernel<<<blocks_q, threads>>>(q.data(), cos.data(), sin.data(), batch, seq_len, num_q_heads, head_dim);
-    rope_kernel<<<blocks_k, threads>>>(k.data(), cos.data(), sin.data(), batch, seq_len, num_kv_heads, head_dim);
+    rope_kernel<<<blocks_q, threads>>>(q.data(), cos.data(), sin.data(),
+                                       batch, seq_len, num_q_heads, head_dim);
+    rope_kernel<<<blocks_k, threads>>>(k.data(), cos.data(), sin.data(),
+                                       batch, seq_len, num_kv_heads, head_dim);
 }
 
 // Grouped Query Attention operations
@@ -361,35 +368,45 @@ void repeat_kv(const Tensor& x, size_t n_rep, Tensor& y) {
         return;
     }
     
-    int batch = x.size(0);
-    int num_kv_heads = x.size(1);
-    int seq_len = x.size(2);
-    int head_dim = x.size(3);
+    // x: (batch, num_kv_heads, seq_len, head_dim)
+    // y: (batch, num_kv_heads * n_rep, seq_len, head_dim)
+    size_t batch = x.size(0);
+    size_t num_kv_heads = x.size(1);
+    size_t seq_len = x.size(2);
+    size_t head_dim = x.size(3);
     int num_heads = num_kv_heads * n_rep; // Output heads
     
-    int threads = 256;
     int total = batch * num_heads * seq_len * head_dim;
     int blocks = (total + threads - 1) / threads;
     
-    repeat_kv_kernel<<<blocks, threads>>>(x.data(), y.data(), batch, num_heads, num_kv_heads, seq_len, head_dim);
+    repeat_kv_kernel<<<blocks, threads>>>(x.data(), y.data(), batch, num_heads,
+                                          num_kv_heads, seq_len, head_dim);
 }
 
 // Convolution operations
 void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias, Tensor& y) {
-    int batch = x.size(0);
-    int channels = x.size(1); // hidden_size
-    int seq_len = x.size(2);
-    int kernel_size = weight.size(2);
+    // x: (batch, channels, seq_len) - Conv1d format
+    // weight: (channels, 1, kernel_size) - grouped conv weights
+    // bias: (channels) [optional]
+    // y: (batch, channels, seq_len)
+
+    size_t batch = x.size(0);
+    size_t channels = x.size(1);
+    size_t seq_len = x.size(2);
+    size_t kernel_size = weight.size(2);
     
+    // Allocate y if needed
     if (y.size() == 0) {
-        y = Tensor({(size_t)batch, (size_t)channels, (size_t)seq_len});
+        y = Tensor({batch, channels, seq_len});
     }
+    y.zero();
     
     int total = batch * channels * seq_len;
-    int threads = 256;
     int blocks = (total + threads - 1) / threads;
     
-    depthwise_conv1d_kernel<<<blocks, threads>>>(x.data(), weight.data(), bias ? bias->data() : nullptr, y.data(), batch, seq_len, channels, kernel_size);
+    causal_conv1d_kernel<<<blocks, threads>>>(x.data(), weight.data(),
+                                              bias ? bias->data() : nullptr, y.data(),
+                                              batch, seq_len, channels, kernel_size);
 }
 
 } // namespace tensor_ops
