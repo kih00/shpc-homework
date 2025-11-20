@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <cuda_runtime.h>
 
 /* Macro for checking CUDA errors */
 #define CHECK_CUDA(call)                                                 \
@@ -59,8 +60,9 @@ public:
     const float& at(size_t i, size_t j, size_t k) const;
     const float& at(size_t i, size_t j, size_t k, size_t l) const;
     
-    // Reshape
+    // Reshape and Resize
     void reshape(const std::vector<size_t>& new_shape);
+    void resize(const std::vector<size_t>& new_shape); // Reallocates only if new size > capacity
     Tensor view(const std::vector<size_t>& new_shape) const;
     
     // IO operations
@@ -80,6 +82,7 @@ public:
 private:
     std::vector<size_t> shape_;
     size_t size_;
+    size_t capacity_; // Allocated size in elements
     float* data_;
     bool owns_data_;
     
@@ -100,6 +103,8 @@ namespace tensor_ops {
     void add_scalar(const Tensor& a, float b, Tensor& c);
     void mul(const Tensor& a, const Tensor& b, Tensor& c);
     void mul_scalar(const Tensor& a, float b, Tensor& c);
+    
+    void add_bias(const Tensor& a, const Tensor& bias, Tensor& c); // Broadcast bias (1D) to a (2D)
     
     // Activation functions
     void silu(const Tensor& x, Tensor& y); // SiLU(x) = x * sigmoid(x)

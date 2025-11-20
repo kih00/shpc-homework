@@ -73,7 +73,13 @@ Tensor ModelLoader::load_tensor(const std::string& name) {
     }
     
     file.seekg(info.offset);
-    file.read(reinterpret_cast<char*>(tensor.data()), info.size);
+    
+    // Read into host buffer first
+    std::vector<char> host_buffer(info.size);
+    file.read(host_buffer.data(), info.size);
+    
+    // Copy to device
+    cudaMemcpy(tensor.data(), host_buffer.data(), info.size, cudaMemcpyHostToDevice);
     
     file.close();
     

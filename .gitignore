@@ -8,6 +8,8 @@
 
 # 개발 환경
 .vscode-server/
+.antigravity-server/
+.gemini/
 .dotnet/
 
 # 운영체제별

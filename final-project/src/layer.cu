@@ -4,290 +4,392 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cuda_runtime.h>
+
+// ============================================================================
+// CUDA Kernels
+// ============================================================================
+
+__global__ void matmul_kernel(float *A, float *B, float *C, int M, int N, int K) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < M && col < N) {
+        float sum = 0.0f;
+        for (int i = 0; i < K; ++i) sum += A[row * K + i] * B[i * N + col];
+        C[row * N + col] = sum;
+    }
+}
+
+__global__ void matmul_transposed_kernel(float *A, float *B, float *C, int M, int N, int K) {
+    // C = A @ B^T
+    // A: (M, K), B: (N, K), C: (M, N)
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < M && col < N) {
+        float sum = 0.0f;
+        for (int i = 0; i < K; ++i) sum += A[row * K + i] * B[col * K + i];
+        C[row * N + col] = sum;
+    }
+}
+
+__global__ void add_kernel(float *a, float *b, float *c, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+
+__global__ void add_scalar_kernel(float *a, float b, float *c, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = a[idx] + b;
+    }
+}
+
+__global__ void mul_kernel(float *a, float *b, float *c, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = a[idx] * b[idx];
+    }
+}
+
+__global__ void mul_scalar_kernel(float *a, float b, float *c, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = a[idx] * b;
+    }
+}
+
+__global__ void silu_kernel(float *x, float *y, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float val = x[idx];
+        y[idx] = val / (1.0f + expf(-val));
+    }
+}
+
+__global__ void sigmoid_kernel(float *x, float *y, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        y[idx] = 1.0f / (1.0f + expf(-x[idx]));
+    }
+}
+
+__global__ void softmax_kernel(float *x, float *y, int rows, int cols) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {
+        float max_val = -1e20f;
+        for (int j = 0; j < cols; ++j) {
+            max_val = max(max_val, x[row * cols + j]);
+        }
+        
+        float sum = 0.0f;
+        for (int j = 0; j < cols; ++j) {
+            float val = expf(x[row * cols + j] - max_val);
+            y[row * cols + j] = val;
+            sum += val;
+        }
+        
+        for (int j = 0; j < cols; ++j) {
+            y[row * cols + j] /= sum;
+        }
+    }
+}
+
+__global__ void rmsnorm_kernel(float *x, float *w, float *out, int rows, int dim) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {
+        float sum_sq = 0.0f;
+        for (int i = 0; i < dim; ++i) {
+            float val = x[row * dim + i];
+            sum_sq += val * val;
+        }
+        float rms = rsqrtf(sum_sq / dim + 1e-6f);
+        for (int i = 0; i < dim; ++i) {
+            out[row * dim + i] = x[row * dim + i] * rms * w[i];
+        }
+    }
+}
+
+__global__ void rope_kernel(float *data, float *cos, float *sin, int batch, int seq_len, int num_heads, int head_dim) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int half_dim = head_dim / 2;
+    int total = batch * seq_len * num_heads * half_dim;
+    if (idx < total) {
+        int hd = idx % half_dim;
+        int rem = idx / half_dim;
+        int h = rem % num_heads;
+        rem /= num_heads;
+        int s = rem % seq_len;
+        int b = rem / seq_len;
+        
+        int i1 = ((b * seq_len + s) * num_heads + h) * head_dim + hd;
+        int i2 = i1 + half_dim;
+        
+        float x1 = data[i1];
+        float x2 = data[i2];
+        float c = cos[s * head_dim + hd];
+        float sn = sin[s * head_dim + hd];
+        
+        data[i1] = x1 * c - x2 * sn;
+        data[i2] = x2 * c + x1 * sn;
+    }
+}
+
+__global__ void repeat_kv_kernel(float *in, float *out, int B, int num_heads, int num_kv_heads, int S, int D) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = B * num_heads * S * D;
+    if (idx < total) {
+        int d = idx % D;
+        int rem = idx / D;
+        int s = rem % S;
+        rem /= S;
+        int h = rem % num_heads;
+        int b = rem / num_heads;
+        
+        int group = num_heads / num_kv_heads;
+        int kv_h = h / group;
+        
+        out[idx] = in[b * (num_kv_heads * S * D) + kv_h * (S * D) + s * D + d];
+    }
+}
+
+__global__ void depthwise_conv1d_kernel(float *Bx, float *W, float *bias, float *ConvOut, int batch, int seq_len, int hidden_size, int kernel_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * hidden_size * seq_len;
+    if (idx < total) {
+        int s = idx % seq_len;
+        int rem = idx / seq_len;
+        int h = rem % hidden_size;
+        int b = rem / hidden_size;
+        
+        int channel_base = b * (hidden_size * seq_len) + h * seq_len;
+        float sum = 0.0f;
+        for (int k = 0; k < kernel_size; ++k) {
+            int input_s = s - (kernel_size - 1) + k;
+            if (input_s >= 0 && input_s < seq_len) {
+                sum += Bx[channel_base + input_s] * W[h * kernel_size + k];
+            }
+        }
+        if (bias != nullptr) {
+            sum += bias[h];
+        }
+        ConvOut[idx] = sum;
+    }
+}
 
 // ============================================================================
 // Tensor Operations - Basic operations on tensors
 // ============================================================================
+
+__global__ void add_bias_kernel(float* a, const float* bias, int rows, int cols) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < rows * cols) {
+        int col = idx % cols;
+        a[idx] += bias[col];
+    }
+}
 
 namespace tensor_ops {
 
 // Matrix operations
 void matmul(const Tensor& a, const Tensor& b, Tensor& c) {
     // a: (m, k), b: (k, n), c: (m, n)
-    size_t m = a.size(0);
-    size_t k = a.size(1);
-    size_t n = b.size(1);
+    int m = a.size(0);
+    int k = a.size(1);
+    int n = b.size(1);
     
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < m; i++) {
-        for (size_t j = 0; j < n; j++) {
-            float sum = 0.0f;
-            for (size_t p = 0; p < k; p++) {
-                sum += a.at(i, p) * b.at(p, j);
-            }
-            c.at(i, j) = sum;
-        }
-    }
+    dim3 block(16, 16);
+    dim3 grid((n + 15)/16, (m + 15)/16);
+    matmul_kernel<<<grid, block>>>(a.data(), b.data(), c.data(), m, n, k);
 }
 
 void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c) {
     // a: (m, k), b: (n, k), c: (m, n)  [c = a @ b^T]
-    size_t m = a.size(0);
-    size_t k = a.size(1);
-    size_t n = b.size(0);
+    int m = a.size(0);
+    int k = a.size(1);
+    int n = b.size(0);
     
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < m; i++) {
-        for (size_t j = 0; j < n; j++) {
-            float sum = 0.0f;
-            for (size_t p = 0; p < k; p++) {
-                sum += a.at(i, p) * b.at(j, p);
-            }
-            c.at(i, j) = sum;
-        }
-    }
+    dim3 block(16, 16);
+    dim3 grid((n + 15)/16, (m + 15)/16);
+    matmul_transposed_kernel<<<grid, block>>>(a.data(), b.data(), c.data(), m, n, k);
 }
 
 // Element-wise operations
 void add(const Tensor& a, const Tensor& b, Tensor& c) {
-    #pragma omp parallel for
-    for (size_t i = 0; i < a.size(); i++) {
-        c[i] = a[i] + b[i];
-    }
+    int n = a.size();
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    add_kernel<<<blocks, threads>>>(a.data(), b.data(), c.data(), n);
 }
 
 void add_scalar(const Tensor& a, float b, Tensor& c) {
-    #pragma omp parallel for
-    for (size_t i = 0; i < a.size(); i++) {
-        c[i] = a[i] + b;
+    int n = a.size();
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    add_scalar_kernel<<<blocks, threads>>>(a.data(), b, c.data(), n);
+}
+
+void add_bias(const Tensor& a, const Tensor& bias, Tensor& c) {
+    // a: (rows, cols), bias: (cols)
+    // Broadcast bias addition: c = a + bias
+    
+    int rows = a.size(0);
+    int cols = a.size(1); // Flattened if > 2D?
+    // If a is (B*S, H), bias is (H).
+    // If a is (B, S, H), bias is (H).
+    // We treat it as (rows, cols) where cols = last dim.
+    cols = a.shape().back();
+    rows = a.size() / cols;
+    
+    int threads = 256;
+    int blocks = (rows * cols + threads - 1) / threads;
+    
+    // Ensure c contains a's data if not in-place
+    if (c.data() != a.data()) {
+        cudaMemcpy(c.data(), a.data(), a.size() * sizeof(float), cudaMemcpyDeviceToDevice);
     }
+    add_bias_kernel<<<blocks, threads>>>(c.data(), bias.data(), rows, cols);
 }
 
 void mul(const Tensor& a, const Tensor& b, Tensor& c) {
-    #pragma omp parallel for
-    for (size_t i = 0; i < a.size(); i++) {
-        c[i] = a[i] * b[i];
-    }
+    int n = a.size();
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    mul_kernel<<<blocks, threads>>>(a.data(), b.data(), c.data(), n);
 }
 
 void mul_scalar(const Tensor& a, float b, Tensor& c) {
-    #pragma omp parallel for
-    for (size_t i = 0; i < a.size(); i++) {
-        c[i] = a[i] * b;
-    }
+    int n = a.size();
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    mul_scalar_kernel<<<blocks, threads>>>(a.data(), b, c.data(), n);
 }
 
 // Activation functions
 void sigmoid(const Tensor& x, Tensor& y) {
-    #pragma omp parallel for
-    for (size_t i = 0; i < x.size(); i++) {
-        y[i] = 1.0f / (1.0f + std::exp(-x[i]));
-    }
+    int n = x.size();
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    sigmoid_kernel<<<blocks, threads>>>(x.data(), y.data(), n);
 }
 
 void silu(const Tensor& x, Tensor& y) {
-    #pragma omp parallel for
-    for (size_t i = 0; i < x.size(); i++) {
-        y[i] = x[i] / (1.0f + std::exp(-x[i]));
-    }
+    int n = x.size();
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    silu_kernel<<<blocks, threads>>>(x.data(), y.data(), n);
 }
 
 void softmax(const Tensor& x, Tensor& y, int dim) {
-    // For simplicity, assume dim=-1 (last dimension)
-    size_t outer_size = 1;
+    // Assume dim=-1
+    int outer_size = 1;
     for (size_t i = 0; i < x.ndim() - 1; i++) {
         outer_size *= x.size(i);
     }
-    size_t inner_size = x.size(-1);
+    int inner_size = x.size(-1);
     
-    #pragma omp parallel for
-    for (size_t i = 0; i < outer_size; i++) {
-        // Find max for numerical stability
-        float max_val = x[i * inner_size];
-        for (size_t j = 1; j < inner_size; j++) {
-            max_val = std::max(max_val, x[i * inner_size + j]);
-        }
-        
-        // Compute exp and sum
-        float sum = 0.0f;
-        for (size_t j = 0; j < inner_size; j++) {
-            y[i * inner_size + j] = std::exp(x[i * inner_size + j] - max_val);
-            sum += y[i * inner_size + j];
-        }
-        
-        // Normalize
-        for (size_t j = 0; j < inner_size; j++) {
-            y[i * inner_size + j] /= sum;
-        }
-    }
+    int threads = 256;
+    int blocks = (outer_size + threads - 1) / threads;
+    int blocks = (outer_size + threads - 1) / threads;
+    // Naive softmax kernel (one thread per row)
+    softmax_kernel<<<blocks, threads>>>(x.data(), y.data(), outer_size, inner_size);
 }
 
 // Normalization
 void rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& y) {
-    size_t outer_size = 1;
+    int outer_size = 1;
     for (size_t i = 0; i < x.ndim() - 1; i++) {
         outer_size *= x.size(i);
     }
-    size_t hidden_size = x.size(-1);
+    int hidden_size = x.size(-1);
     
-    #pragma omp parallel for
-    for (size_t i = 0; i < outer_size; i++) {
-        // Compute RMS
-        float sum_sq = 0.0f;
-        for (size_t j = 0; j < hidden_size; j++) {
-            float val = x[i * hidden_size + j];
-            sum_sq += val * val;
-        }
-        float rms = std::sqrt(sum_sq / hidden_size + eps);
-        
-        // Normalize and scale
-        for (size_t j = 0; j < hidden_size; j++) {
-            y[i * hidden_size + j] = (x[i * hidden_size + j] / rms) * weight[j];
-        }
-    }
+    int threads = 256;
+    int blocks = (outer_size + threads - 1) / threads;
+    rmsnorm_kernel<<<blocks, threads>>>(x.data(), weight.data(), y.data(), outer_size, hidden_size);
 }
 
 // RoPE operations
 void compute_rope_embeddings(size_t head_dim, size_t max_seq_len, float theta,
                              Tensor& cos, Tensor& sin) {
-    // Compute frequency bands
+    // Compute on Host and copy to Device
+    
+    std::vector<float> h_cos(max_seq_len * head_dim);
+    std::vector<float> h_sin(max_seq_len * head_dim);
+    
     std::vector<float> inv_freq(head_dim / 2);
     for (size_t i = 0; i < head_dim / 2; i++) {
         inv_freq[i] = 1.0f / std::pow(theta, (float)(2 * i) / head_dim);
     }
     
-    // Compute cos and sin for each position
-    #pragma omp parallel for
     for (size_t pos = 0; pos < max_seq_len; pos++) {
         for (size_t i = 0; i < head_dim / 2; i++) {
             float angle = pos * inv_freq[i];
-            cos.at(pos, i) = std::cos(angle);
-            cos.at(pos, i + head_dim / 2) = std::cos(angle);
-            sin.at(pos, i) = std::sin(angle);
-            sin.at(pos, i + head_dim / 2) = std::sin(angle);
+            h_cos[pos * head_dim + i] = std::cos(angle);
+            h_cos[pos * head_dim + i + head_dim / 2] = std::cos(angle);
+            h_sin[pos * head_dim + i] = std::sin(angle);
+            h_sin[pos * head_dim + i + head_dim / 2] = std::sin(angle);
         }
     }
+    
+    cudaMemcpy(cos.data(), h_cos.data(), h_cos.size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(sin.data(), h_sin.data(), h_sin.size() * sizeof(float), cudaMemcpyHostToDevice);
 }
 
 void apply_rotary_pos_emb(Tensor& q, Tensor& k, const Tensor& cos, const Tensor& sin) {
-    // q: (batch, num_q_heads, seq_len, head_dim)
-    // k: (batch, num_kv_heads, seq_len, head_dim)
-    // cos, sin: (seq_len, head_dim)
-    // 
-    // Apply rotation: q_embed = (q * cos) + (rotate_half(q) * sin)
-    // rotate_half: concat([-x2, x1]) where x1=x[..., :head_dim/2], x2=x[..., head_dim/2:]
+    int batch = q.size(0);
+    int num_q_heads = q.size(1);
+    int num_kv_heads = k.size(1);
+    int seq_len = q.size(2);
+    int head_dim = q.size(3);
     
-    size_t batch = q.size(0);
-    size_t num_q_heads = q.size(1);
-    size_t num_kv_heads = k.size(1);
-    size_t seq_len = q.size(2);
-    size_t head_dim = q.size(3);
-    size_t half_dim = head_dim / 2;
+    int total_q = batch * seq_len * num_q_heads;
+    int total_k = batch * seq_len * num_kv_heads;
     
-    // Rotate q
-    #pragma omp parallel for collapse(4)
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t h = 0; h < num_q_heads; h++) {
-            for (size_t s = 0; s < seq_len; s++) {
-                for (size_t d = 0; d < half_dim; d++) {
-                    float q1 = q.at(b, h, s, d);                  // first half
-                    float q2 = q.at(b, h, s, d + half_dim);       // second half
-                    
-                    // q_rotated = q * cos + rotate_half(q) * sin
-                    // rotate_half(q) = [-q2, q1]
-                    q.at(b, h, s, d) = q1 * cos.at(s, d) + (-q2) * sin.at(s, d);
-                    q.at(b, h, s, d + half_dim) = q2 * cos.at(s, d + half_dim) + q1 * sin.at(s, d + half_dim);
-                }
-            }
-        }
-    }
+    int threads = 256;
+    int blocks_q = (total_q * (head_dim/2) + threads - 1) / threads;
+    int blocks_k = (total_k * (head_dim/2) + threads - 1) / threads;
     
-    // Rotate k (separate loop with correct num_kv_heads)
-    #pragma omp parallel for collapse(4)
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t h = 0; h < num_kv_heads; h++) {
-            for (size_t s = 0; s < seq_len; s++) {
-                for (size_t d = 0; d < half_dim; d++) {
-                    float k1 = k.at(b, h, s, d);
-                    float k2 = k.at(b, h, s, d + half_dim);
-                    
-                    k.at(b, h, s, d) = k1 * cos.at(s, d) + (-k2) * sin.at(s, d);
-                    k.at(b, h, s, d + half_dim) = k2 * cos.at(s, d + half_dim) + k1 * sin.at(s, d + half_dim);
-                }
-            }
-        }
-    }
+    rope_kernel<<<blocks_q, threads>>>(q.data(), cos.data(), sin.data(), batch, seq_len, num_q_heads, head_dim);
+    rope_kernel<<<blocks_k, threads>>>(k.data(), cos.data(), sin.data(), batch, seq_len, num_kv_heads, head_dim);
 }
 
 // Grouped Query Attention operations
 void repeat_kv(const Tensor& x, size_t n_rep, Tensor& y) {
     if (n_rep == 1) {
-        std::memcpy(y.data(), x.data(), x.size() * sizeof(float));
+        cudaMemcpy(y.data(), x.data(), x.size() * sizeof(float), cudaMemcpyDeviceToDevice);
         return;
     }
     
-    // x: (batch, num_kv_heads, seq_len, head_dim)
-    // y: (batch, num_kv_heads * n_rep, seq_len, head_dim)
-    size_t batch = x.size(0);
-    size_t num_kv_heads = x.size(1);
-    size_t seq_len = x.size(2);
-    size_t head_dim = x.size(3);
+    int batch = x.size(0);
+    int num_kv_heads = x.size(1);
+    int seq_len = x.size(2);
+    int head_dim = x.size(3);
+    int num_heads = num_kv_heads * n_rep; // Output heads
     
-    #pragma omp parallel for collapse(4)
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t h = 0; h < num_kv_heads; h++) {
-            for (size_t r = 0; r < n_rep; r++) {
-                for (size_t s = 0; s < seq_len; s++) {
-                    size_t out_h = h * n_rep + r;
-                    for (size_t d = 0; d < head_dim; d++) {
-                        y.at(b, out_h, s, d) = x.at(b, h, s, d);
-                    }
-                }
-            }
-        }
-    }
+    int threads = 256;
+    int total = batch * num_heads * seq_len * head_dim;
+    int blocks = (total + threads - 1) / threads;
+    
+    repeat_kv_kernel<<<blocks, threads>>>(x.data(), y.data(), batch, num_heads, num_kv_heads, seq_len, head_dim);
 }
 
 // Convolution operations
 void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias, Tensor& y) {
-    // x: (batch, channels, seq_len) - Conv1d format
-    // weight: (channels, 1, kernel_size) - grouped conv weights
-    // bias: (channels) [optional]
-    // y: (batch, channels, seq_len)
+    int batch = x.size(0);
+    int channels = x.size(1); // hidden_size
+    int seq_len = x.size(2);
+    int kernel_size = weight.size(2);
     
-    size_t batch = x.size(0);
-    size_t channels = x.size(1);
-    size_t seq_len = x.size(2);
-    size_t kernel_size = weight.size(2);
-    
-    // Allocate y if needed
     if (y.size() == 0) {
-        y = Tensor({batch, channels, seq_len});
+        y = Tensor({(size_t)batch, (size_t)channels, (size_t)seq_len});
     }
-    y.zero();
     
-    #pragma omp parallel for collapse(3)
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t c = 0; c < channels; c++) {
-            for (size_t s = 0; s < seq_len; s++) {
-                float sum = 0.0f;
-                // PyTorch Conv1d with padding=kernel_size-1:
-                // At output position s, uses input positions [s-(kernel_size-1), ..., s]
-                // kernel[0] multiplies input[s-(kernel_size-1)] (oldest)
-                // kernel[kernel_size-1] multiplies input[s] (current)
-                for (size_t k = 0; k < kernel_size; k++) {
-                    int input_pos = (int)s - ((int)kernel_size - 1) + (int)k;
-                    if (input_pos >= 0) {
-                        sum += x.at(b, c, input_pos) * weight.at(c, 0, k);
-                    }
-                }
-                if (bias != nullptr) {
-                    sum += (*bias)[c];
-                }
-                y.at(b, c, s) = sum;
-            }
-        }
-    }
+    int total = batch * channels * seq_len;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    
+    depthwise_conv1d_kernel<<<blocks, threads>>>(x.data(), weight.data(), bias ? bias->data() : nullptr, y.data(), batch, seq_len, channels, kernel_size);
 }
 
 } // namespace tensor_ops
@@ -314,14 +416,12 @@ RotaryEmbedding::RotaryEmbedding() : max_seq_len_(MAX_POSITION_EMBEDDINGS) {
 }
 
 void RotaryEmbedding::forward(size_t seq_len, Tensor& cos, Tensor& sin) {
-    // Return cached values for the given sequence length
-    // cos, sin should be: (seq_len, head_dim)
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < seq_len; i++) {
-        for (size_t j = 0; j < HEAD_DIM; j++) {
-            cos.at(i, j) = cos_cached_.at(i, j);
-            sin.at(i, j) = sin_cached_.at(i, j);
-        }
-    }
+    // Copy cached tensors to output buffers
+    
+    // cos: (seq_len, head_dim)
+    size_t copy_size = seq_len * HEAD_DIM * sizeof(float);
+    cudaMemcpy(cos.data(), cos_cached_.data(), copy_size, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(sin.data(), sin_cached_.data(), copy_size, cudaMemcpyDeviceToDevice);
 }
+
 
