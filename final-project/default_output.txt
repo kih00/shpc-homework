@@ -1,0 +1,63 @@
+
+=============================================
+ Model: LFM2-8B-A1B
+---------------------------------------------
+ Validation: ON
+ Warm-up: OFF
+ Number of samples: 1
+=============================================
+
+Initializing inputs and outputs...Done!
+Input file info:
+  Total samples: 1024
+  Sequence length: 16
+  Processing samples: 1
+
+Loading model from /mnt/ramdisk/model.bin...Loading LFM2-8B-A1B model from /mnt/ramdisk/model.bin
+Loading model index from /mnt/ramdisk/model.bin
+  Number of tensors: 2302
+  Index loaded successfully
+Loading embeddings...
+  Embeddings shape: 65536 x 2048
+Loading 24 decoder layers...
+  Layer 0: Conv
+  Layer 1: Conv
+  Layer 2: Attention
+  Layer 3: Conv
+  Layer 4: Conv
+  Layer 5: Conv
+  Layer 6: Attention
+  Layer 7: Conv
+  Layer 8: Conv
+  Layer 9: Conv
+  Layer 10: Attention
+  Layer 11: Conv
+  Layer 12: Conv
+  Layer 13: Conv
+  Layer 14: Attention
+  Layer 15: Conv
+  Layer 16: Conv
+  Layer 17: Conv
+  Layer 18: Attention
+  Layer 19: Conv
+  Layer 20: Conv
+  Layer 21: Attention
+  Layer 22: Conv
+  Layer 23: Conv
+Loading output layers...
+  Using tied weights for LM head
+Model loaded successfully!
+Generating...Done!
+Elapsed time: 8.017061 (sec)
+Throughput: 0.124734 (samples/sec)
+
+Saving outputs to data/outputs.bin...Done!
+===========================================================
+Validating against reference answers...
+===========================================================
+
+Comparing 1 samples...
+Threshold: 1e-3
+
+Top-1 Prediction Accuracy: 100% (1/1)
+VALID

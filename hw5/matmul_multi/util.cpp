@@ -8,6 +8,8 @@
 
 #include <time.h>
 
+#include <cuda_runtime.h>
+
 static double start_time[8];
 
 void timer_init() { srand(time(NULL)); }
@@ -23,8 +25,12 @@ void timer_start(int i) { start_time[i] = get_time(); }
 double timer_stop(int i) { return get_time() - start_time[i]; }
 
 void alloc_mat(float **m, int R, int S) {
-  *m = (float *)aligned_alloc(32, sizeof(float) * R * S);
-  if (*m == NULL) {
+  // *m = (float *)aligned_alloc(32, sizeof(float) * R * S);
+  // if (*m == NULL) {
+  //   printf("Failed to allocate memory for mat.\n");
+  //   exit(0);
+  // }
+  if (cudaMallocHost(m, sizeof(float) * R * S) != cudaSuccess) {
     printf("Failed to allocate memory for mat.\n");
     exit(0);
   }
