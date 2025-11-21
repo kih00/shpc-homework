@@ -62,7 +62,6 @@ public:
     
     // Reshape and Resize
     void reshape(const std::vector<size_t>& new_shape);
-    void resize(const std::vector<size_t>& new_shape); // Reallocates only if new size > capacity
     Tensor view(const std::vector<size_t>& new_shape) const;
     
     // IO operations
@@ -82,7 +81,6 @@ public:
 private:
     std::vector<size_t> shape_;
     size_t size_;
-    size_t capacity_; // Allocated size in elements
     float* data_;
     bool owns_data_;
     

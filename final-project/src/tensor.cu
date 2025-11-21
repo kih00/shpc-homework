@@ -15,24 +15,22 @@ extern std::unique_ptr<ModelLoader> g_model_loader;
 // All tensor operations are implemented in layer.cu
 
 // Tensor constructors and destructors
-Tensor::Tensor() : size_(0), capacity_(0), data_(nullptr), owns_data_(false) {}
+Tensor::Tensor() : size_(0), data_(nullptr), owns_data_(false) {}
 
 Tensor::Tensor(const std::vector<size_t>& shape) 
     : shape_(shape), owns_data_(true) {
     size_ = compute_size();
-    allocate(); // Sets capacity_
+    allocate();
 }
 
 Tensor::Tensor(const std::vector<size_t>& shape, float* data, bool copy)
     : shape_(shape), owns_data_(copy) {
     size_ = compute_size();
     if (copy) {
-        allocate(); // Sets capacity_
-        // Copy from Host to Device
-        cudaMemcpy(data_, data, size_ * sizeof(float), cudaMemcpyHostToDevice);
+        allocate();
+        CHECK_CUDA(cudaMemcpy(data_, data, size_ * sizeof(float), cudaMemcpyHostToDevice));
     } else {
         data_ = data;
-        capacity_ = size_; // View has capacity of its size
     }
 }
 
@@ -44,11 +42,9 @@ Tensor::~Tensor() {
 Tensor::Tensor(const Tensor& other)
     : shape_(other.shape_), size_(other.size_), owns_data_(true) {
     if (other.size_ > 0) {
-        allocate(); // Sets capacity_
-        // Device to Device copy
-        cudaMemcpy(data_, other.data_, size_ * sizeof(float), cudaMemcpyDeviceToDevice);
+        allocate();
+        CHECK_CUDA(cudaMemcpy(data_, other.data_, size_ * sizeof(float), cudaMemcpyDeviceToDevice));
     } else {
-        capacity_ = 0;
         data_ = nullptr;
     }
 }
@@ -56,25 +52,15 @@ Tensor::Tensor(const Tensor& other)
 // Copy assignment
 Tensor& Tensor::operator=(const Tensor& other) {
     if (this != &other) {
-        // If we have enough capacity, reuse it
-        if (other.size_ <= capacity_ && owns_data_) {
-            size_ = other.size_;
-            shape_ = other.shape_;
-            if (size_ > 0) {
-                cudaMemcpy(data_, other.data_, size_ * sizeof(float), cudaMemcpyDeviceToDevice);
-            }
+        deallocate();
+        shape_ = other.shape_;
+        size_ = other.size_;
+        owns_data_ = true;
+        if (other.size_ > 0) {
+            allocate();
+            CHECK_CUDA(cudaMemcpy(data_, other.data_, size_ * sizeof(float), cudaMemcpyDeviceToDevice));
         } else {
-            deallocate();
-            shape_ = other.shape_;
-            size_ = other.size_;
-            owns_data_ = true;
-            if (other.size_ > 0) {
-                allocate();
-                cudaMemcpy(data_, other.data_, size_ * sizeof(float), cudaMemcpyDeviceToDevice);
-            } else {
-                capacity_ = 0;
-                data_ = nullptr;
-            }
+            data_ = nullptr;
         }
     }
     return *this;
@@ -82,11 +68,10 @@ Tensor& Tensor::operator=(const Tensor& other) {
 
 // Move constructor
 Tensor::Tensor(Tensor&& other) noexcept
-    : shape_(std::move(other.shape_)), size_(other.size_), capacity_(other.capacity_),
+    : shape_(std::move(other.shape_)), size_(other.size_),
       data_(other.data_), owns_data_(other.owns_data_) {
     other.data_ = nullptr;
     other.size_ = 0;
-    other.capacity_ = 0;
     other.owns_data_ = false;
 }
 
@@ -96,13 +81,11 @@ Tensor& Tensor::operator=(Tensor&& other) noexcept {
         deallocate();
         shape_ = std::move(other.shape_);
         size_ = other.size_;
-        capacity_ = other.capacity_;
         data_ = other.data_;
         owns_data_ = other.owns_data_;
         
         other.data_ = nullptr;
         other.size_ = 0;
-        other.capacity_ = 0;
         other.owns_data_ = false;
     }
     return *this;
@@ -110,23 +93,17 @@ Tensor& Tensor::operator=(Tensor&& other) noexcept {
 
 void Tensor::allocate() {
     if (size_ > 0) {
-        cudaError_t status = cudaMalloc(&data_, size_ * sizeof(float));
-        if (status != cudaSuccess) {
-            throw std::runtime_error(std::string("CUDA malloc failed: ") + cudaGetErrorString(status));
-        }
-        capacity_ = size_;
+        CHECK_CUDA(cudaMalloc(&data_, size_ * sizeof(float)));
     } else {
         data_ = nullptr;
-        capacity_ = 0;
     }
 }
 
 void Tensor::deallocate() {
     if (owns_data_ && data_ != nullptr) {
-        cudaFree(data_);
+        CHECK_CUDA(cudaFree(data_));
         data_ = nullptr;
     }
-    capacity_ = 0;
 }
 
 size_t Tensor::compute_size() const {
@@ -192,24 +169,6 @@ void Tensor::reshape(const std::vector<size_t>& new_shape) {
     shape_ = new_shape;
 }
 
-void Tensor::resize(const std::vector<size_t>& new_shape) {
-    size_t new_size = std::accumulate(new_shape.begin(), new_shape.end(), 1ULL, std::multiplies<size_t>());
-    
-    if (new_size > capacity_) {
-        // Need to reallocate
-        deallocate();
-        shape_ = new_shape;
-        size_ = new_size;
-        owns_data_ = true; // We must own the new memory
-        allocate();
-    } else {
-        // Reuse existing memory
-        shape_ = new_shape;
-        size_ = new_size;
-        // Data content is undefined/preserved but we don't guarantee it
-    }
-}
-
 Tensor Tensor::view(const std::vector<size_t>& new_shape) const {
     // Verify new shape has same number of elements
     size_t new_size = std::accumulate(new_shape.begin(), new_shape.end(), 1ULL, std::multiplies<size_t>());
@@ -231,8 +190,6 @@ Tensor Tensor::load_from_file(const std::string& filename, ModelLoader* loader) 
     
     // Otherwise, if global model loader is available, use it
     if (g_model_loader) {
-        // The filename is the tensor name (e.g., "embed_tokens.weight")
-        // No need to strip anything if properly passed
         return g_model_loader->load_tensor(filename);
     }
     
@@ -261,7 +218,7 @@ Tensor Tensor::load_from_file(const std::string& filename, ModelLoader* loader) 
     // Copy to host buffer first then to device
     std::vector<float> host_data(tensor.size());
     file.read(reinterpret_cast<char*>(host_data.data()), tensor.size() * sizeof(float));
-    cudaMemcpy(tensor.data(), host_data.data(), tensor.size() * sizeof(float), cudaMemcpyHostToDevice);
+    CHECK_CUDA(cudaMemcpy(tensor.data(), host_data.data(), tensor.size() * sizeof(float), cudaMemcpyHostToDevice));
     
     file.close();
     return tensor;
@@ -286,7 +243,7 @@ void Tensor::save_to_file(const std::string& filename) const {
     // Write data
     // Copy from device to host first
     std::vector<float> host_data(size_);
-    cudaMemcpy(host_data.data(), data_, size_ * sizeof(float), cudaMemcpyDeviceToHost);
+    CHECK_CUDA(cudaMemcpy(host_data.data(), data_, size_ * sizeof(float), cudaMemcpyDeviceToHost));
     file.write(reinterpret_cast<const char*>(host_data.data()), size_ * sizeof(float));
     
     file.close();
@@ -298,19 +255,18 @@ Tensor Tensor::copy() const {
 }
 
 void Tensor::fill(float value) {
-    // Fill with value
     if (value == 0.0f) {
         zero();
     } else {
-        // Fallback: copy from host (slow but works)
+        // Fallback: copy from host
         std::vector<float> host_data(size_, value);
-        cudaMemcpy(data_, host_data.data(), size_ * sizeof(float), cudaMemcpyHostToDevice);
+        CHECK_CUDA(cudaMemcpy(data_, host_data.data(), size_ * sizeof(float), cudaMemcpyHostToDevice));
     }
 }
 
 void Tensor::zero() {
     if (data_ != nullptr && size_ > 0) {
-        cudaMemset(data_, 0, size_ * sizeof(float));
+        CHECK_CUDA(cudaMemset(data_, 0, size_ * sizeof(float)));
     }
 }
 

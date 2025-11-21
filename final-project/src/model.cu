@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <random>
 #include <cstring>
+#include <vector>
 #include <cuda_runtime.h>
 
 // Global model loader (definition)
@@ -14,171 +15,15 @@ std::unique_ptr<ModelLoader> g_model_loader;
 // ============================================================================
 // CUDA Kernels
 // ============================================================================
+// Kernels are imported from layer.h
+// embedding_kernel is shared but declared here if not in layer.h
+__global__ void embedding_kernel(int *input_ids, float *embedding_table, float *output, int batch, int seq_len, int hidden_size);
 
-__global__ void embedding_kernel(int *input_ids, float *embedding_table, float *output, int batch, int seq_len, int hidden_size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * seq_len * hidden_size;
-    if (idx < total) {
-        int h = idx % hidden_size;
-        int rem = idx / hidden_size;
-        int s = rem % seq_len;
-        int b = rem / seq_len;
-        
-        int token_id = input_ids[b * seq_len + s];
-        output[idx] = embedding_table[token_id * hidden_size + h];
-    }
-}
+// ============================================================================
+// CUDA Kernels
+// ============================================================================
+// Kernels are now imported from layer.h
 
-__global__ void transpose_BSHD_BHSD_kernel(float *in, float *out, int B, int S, int H, int D) {
-    // (B, S, H, D) -> (B, H, S, D)
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B * S * H * D;
-    if (idx < total) {
-        int d = idx % D;
-        int rem = idx / D;
-        int h = rem % H;
-        rem /= H;
-        int s = rem % S;
-        int b = rem / S;
-        
-        // Out index: b, h, s, d
-        int out_idx = ((b * H + h) * S + s) * D + d;
-        out[out_idx] = in[idx];
-    }
-}
-
-__global__ void transpose_BHSD_BSHD_kernel(float *in, float *out, int B, int H, int S, int D) {
-    // (B, H, S, D) -> (B, S, H, D)
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B * H * S * D;
-    if (idx < total) {
-        int d = idx % D;
-        int rem = idx / D;
-        int s = rem % S;
-        rem /= S;
-        int h = rem % H;
-        int b = rem / H;
-        
-        // Out index: b, s, h, d
-        int out_idx = ((b * S + s) * H + h) * D + d;
-        out[out_idx] = in[idx];
-    }
-}
-
-__global__ void transpose_BSC_BCS_kernel(float *in, float *out, int B, int S, int C) {
-    // (B, S, C) -> (B, C, S)
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B * S * C;
-    if (idx < total) {
-        int c = idx % C;
-        int rem = idx / C;
-        int s = rem % S;
-        int b = rem / S;
-        
-        // Out index: b, c, s
-        int out_idx = (b * C + c) * S + s;
-        out[out_idx] = in[idx];
-    }
-}
-
-__global__ void transpose_BCS_BSC_kernel(float *in, float *out, int B, int C, int S) {
-    // (B, C, S) -> (B, S, C)
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B * C * S;
-    if (idx < total) {
-        int s = idx % S;
-        int rem = idx / S;
-        int c = rem % C;
-        int b = rem / C;
-        
-        // Out index: b, s, c
-        int out_idx = (b * S + s) * C + c;
-        out[out_idx] = in[idx];
-    }
-}
-
-// MoE Kernels
-__global__ void router_kernel(float* router_logits, int* top_k_indices, float* top_k_weights, 
-                              int num_tokens, int num_experts, int k, float expert_bias_val) {
-    // Naive implementation for small k (k=2)
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t < num_tokens) {
-        // 1. Compute sigmoid and scores
-        // Since k is small (2) and num_experts is small, we iterate.
-        
-        // Find top-k
-        // For k=2, we can just find max, then second max.
-        
-        int best_idx = -1;
-        float best_score = -1e20f;
-        float best_weight = 0.0f;
-        
-        for (int e = 0; e < num_experts; ++e) {
-            float logit = router_logits[t * num_experts + e];
-            float weight = 1.0f / (1.0f + expf(-logit));
-            float score = weight; // Assuming no bias for now or handled
-            
-            if (score > best_score) {
-                best_score = score;
-                best_idx = e;
-                best_weight = weight;
-            }
-        }
-        
-        top_k_indices[t * k + 0] = best_idx;
-        top_k_weights[t * k + 0] = best_weight;
-        
-        // Find second best
-        int second_best_idx = -1;
-        float second_best_score = -1e20f;
-        float second_best_weight = 0.0f;
-        
-        for (int e = 0; e < num_experts; ++e) {
-            if (e == best_idx) continue;
-            
-            float logit = router_logits[t * num_experts + e];
-            float weight = 1.0f / (1.0f + expf(-logit));
-            float score = weight;
-            
-            if (score > second_best_score) {
-                second_best_score = score;
-                second_best_idx = e;
-                second_best_weight = weight;
-            }
-        }
-        
-        top_k_indices[t * k + 1] = second_best_idx;
-        top_k_weights[t * k + 1] = second_best_weight;
-        
-        // Normalize
-        float sum = top_k_weights[t * k + 0] + top_k_weights[t * k + 1];
-        if (sum > 1e-6f) {
-            top_k_weights[t * k + 0] /= sum;
-            top_k_weights[t * k + 1] /= sum;
-        }
-        
-        // Scale (assuming scaling factor is 1.0)
-    }
-}
-
-__global__ void gather_kernel(float* x, int* top_k_indices, float* expert_input, 
-                              int num_tokens, int hidden_size, int k, int expert_idx, int* count) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t < num_tokens) {
-        for (int i = 0; i < k; ++i) {
-            if (top_k_indices[t * k + i] == expert_idx) {
-                int pos = atomicAdd(count, 1);
-                for (int h = 0; h < hidden_size; ++h) {
-                    expert_input[pos * hidden_size + h] = x[t * hidden_size + h];
-                }
-                // Store expert input
-                for (int h = 0; h < hidden_size; ++h) {
-                    expert_input[pos * hidden_size + h] = x[t * hidden_size + h];
-                }
-            }
-        }
-    }
-}
 
 // ============================================================================
 // Large Block Implementations - Complex layers and modules
@@ -233,47 +78,8 @@ void MLP::forward(const Tensor& x, Tensor& y) {
     std::memcpy(y.data(), y_flat.data(), y.size() * sizeof(float));
 }
 
-// Additional MoE Kernels
-__global__ void gather_with_indices_kernel(float* x, int* top_k_indices, float* expert_input, int* indices_map,
-                                           int num_tokens, int hidden_size, int k, int expert_idx, int* count) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t < num_tokens) {
-        for (int i = 0; i < k; ++i) {
-            if (top_k_indices[t * k + i] == expert_idx) {
-                int pos = atomicAdd(count, 1);
-                indices_map[pos] = t; // Store original token index
-                for (int h = 0; h < hidden_size; ++h) {
-                    expert_input[pos * hidden_size + h] = x[t * hidden_size + h];
-                }
-            }
-        }
-    }
-}
+// Additional MoE Kernels removed (using shared kernels)
 
-__global__ void scatter_add_kernel(float* expert_output, int* indices_map, float* top_k_weights, int* top_k_indices, 
-                                   float* y, int count, int hidden_size, int k, int expert_idx) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = count * hidden_size;
-    
-    if (idx < total) {
-        int h = idx % hidden_size;
-        int pos = idx / hidden_size;
-        
-        int t = indices_map[pos];
-        float output_val = expert_output[pos * hidden_size + h];
-        
-        // Find weight for this expert
-        float weight = 0.0f;
-        for (int i = 0; i < k; ++i) {
-            if (top_k_indices[t * k + i] == expert_idx) {
-                weight = top_k_weights[t * k + i];
-                break;
-            }
-        }
-        
-        atomicAdd(&y[t * hidden_size + h], output_val * weight);
-    }
-}
 
 // SparseMoeBlock implementation
 SparseMoeBlock::SparseMoeBlock(int layer_idx) {
@@ -301,28 +107,31 @@ SparseMoeBlock::SparseMoeBlock(int layer_idx) {
     }
     
     // Initialize d_count_tensor_ (1 element)
-    d_count_tensor_ = Tensor({1}); // TODO: undefined identifier
+    d_count_tensor_ = Tensor({1});
+    d_count_tensor_.zero();
 }
 
 void SparseMoeBlock::route_tokens(const Tensor& router_logits, 
                                    Tensor& top_k_indices,
-                                   Tensor& top_k_weights) { // TODO: different signature from header
+                                   Tensor& top_k_weights) {
     // router_logits: (batch * seq_len, num_experts)
     size_t num_tokens = router_logits.size(0);
     
     // Allocate outputs on GPU
-    top_k_indices.resize({num_tokens, NUM_EXPERTS_PER_TOK});
-    top_k_weights.resize({num_tokens, NUM_EXPERTS_PER_TOK});
+    top_k_indices = Tensor({num_tokens, NUM_EXPERTS_PER_TOK});
+    top_k_weights = Tensor({num_tokens, NUM_EXPERTS_PER_TOK});
     
     int threads = 256;
     int blocks = (num_tokens + threads - 1) / threads;
     
     // We need to cast float* to int* for indices
+    // We need to cast float* to int* for indices
     router_kernel<<<blocks, threads>>>(
         (float*)router_logits.data(), 
+        USE_EXPERT_BIAS ? expert_bias_.data() : nullptr,
         (int*)top_k_indices.data(), 
         top_k_weights.data(), 
-        num_tokens, NUM_EXPERTS, NUM_EXPERTS_PER_TOK, 0.0f
+        num_tokens, NUM_EXPERTS, NUM_EXPERTS_PER_TOK, USE_EXPERT_BIAS
     );
 }
 
@@ -337,63 +146,82 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
     Tensor x_flat = x.view({num_tokens, hidden_size});
     
     // Compute router logits
-    router_logits_.resize({num_tokens, NUM_EXPERTS}); // TODO: undefined identifier
+    router_logits_ = Tensor({num_tokens, NUM_EXPERTS});
     tensor_ops::matmul_transposed(x_flat, gate_, router_logits_);
     
     // Route tokens
-    route_tokens(router_logits_, top_k_indices_, top_k_weights_); // TODO: undefined identifier
+    route_tokens(router_logits_, top_k_indices_, top_k_weights_);
     
     // Initialize output
     y = Tensor({batch, seq_len, hidden_size});
     y.zero();
     
-    // Process each expert
-    int* d_count = (int*)d_count_tensor_.data(); // TODO: undefined identifier
+    // Host-side scheduling
+    // 1. Copy indices and weights to host
+    std::vector<int> host_indices(num_tokens * NUM_EXPERTS_PER_TOK);
+    std::vector<float> host_weights(num_tokens * NUM_EXPERTS_PER_TOK);
+    
+    CHECK_CUDA(cudaMemcpy(host_indices.data(), top_k_indices_.data(), num_tokens * NUM_EXPERTS_PER_TOK * sizeof(int), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(host_weights.data(), top_k_weights_.data(), num_tokens * NUM_EXPERTS_PER_TOK * sizeof(float), cudaMemcpyDeviceToHost));
+    
+    // 2. Sort tokens by expert
+    std::vector<std::vector<int>> expert_token_indices(NUM_EXPERTS);
+    std::vector<std::vector<float>> expert_token_weights(NUM_EXPERTS);
+    
+    for (size_t t = 0; t < num_tokens; ++t) {
+        for (int k = 0; k < NUM_EXPERTS_PER_TOK; ++k) {
+            int expert_idx = host_indices[t * NUM_EXPERTS_PER_TOK + k];
+            float weight = host_weights[t * NUM_EXPERTS_PER_TOK + k];
+            
+            if (expert_idx >= 0 && expert_idx < NUM_EXPERTS) {
+                expert_token_indices[expert_idx].push_back(t);
+                expert_token_weights[expert_idx].push_back(weight);
+            }
+        }
+    }
     
     // Temporary buffers for gather/scatter
-    expert_input_.resize({num_tokens, hidden_size}); // TODO: undefined identifier
-    expert_output_.resize({num_tokens, hidden_size}); // TODO: undefined identifier
-    indices_map_.resize({num_tokens}); // Store original indices, treat as float* but use as int*
+    expert_input_ = Tensor({num_tokens, hidden_size});
+    expert_output_ = Tensor({num_tokens, hidden_size});
+    indices_map_ = Tensor({num_tokens}); // Reused for indices
+    // We reuse top_k_weights_ for weights buffer as it is large enough (num_tokens * k >= num_tokens)
     
     for (size_t e = 0; e < NUM_EXPERTS; e++) {
-        // Reset count
-        cudaMemset(d_count, 0, sizeof(int));
+        int count = expert_token_indices[e].size();
+        if (count == 0) continue;
+        
+        // Copy indices and weights to device
+        CHECK_CUDA(cudaMemcpy(indices_map_.data(), expert_token_indices[e].data(), count * sizeof(int), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(top_k_weights_.data(), expert_token_weights[e].data(), count * sizeof(float), cudaMemcpyHostToDevice));
+        
+        int threads = 256;
+        int blocks = (count + threads - 1) / threads;
         
         // Gather
-        int threads = 256;
-        int blocks = (num_tokens + threads - 1) / threads;
-        gather_with_indices_kernel<<<blocks, threads>>>(
-            (float*)x_flat.data(), 
-            (int*)top_k_indices_.data(), 
+        // gather_kernel(x, expert_in, indices, count, hidden)
+        CHECK_CUDA(gather_kernel<<<blocks, threads>>>(
+            x_flat.data(), 
             expert_input_.data(), 
-            (int*)indices_map_.data(),
-            num_tokens, hidden_size, NUM_EXPERTS_PER_TOK, e, d_count
-        );
+            (int*)indices_map_.data(), 
+            count, hidden_size
+        ));
         
-        // Get count to host
-        int count = 0;
-        cudaMemcpy(&count, d_count, sizeof(int), cudaMemcpyDeviceToHost);
+        // Expert Forward
+        Tensor curr_input = expert_input_.view({(size_t)count, hidden_size});
+        Tensor curr_output = expert_output_.view({(size_t)count, hidden_size});
+        experts_[e].forward(curr_input, curr_output);
         
-        if (count > 0) {
-            // View into the buffers for the valid count
-            Tensor curr_input = expert_input_.view({(size_t)count, hidden_size});
-            Tensor curr_output = expert_output_.view({(size_t)count, hidden_size});
-            
-            // Forward pass through expert MLP
-            experts_[e].forward(curr_input, curr_output);
-            
-            // Scatter add
-            int total_elements = count * hidden_size;
-            int scatter_blocks = (total_elements + threads - 1) / threads;
-            scatter_add_kernel<<<scatter_blocks, threads>>>(
-                curr_output.data(), 
-                (int*)indices_map_.data(), 
-                top_k_weights_.data(), 
-                (int*)top_k_indices_.data(), 
-                y.data(), 
-                count, hidden_size, NUM_EXPERTS_PER_TOK, e
-            );
-        }
+        // Scatter Add
+        // scatter_add_kernel(expert_out, output, indices, weights, count, hidden)
+        int total_elements = count * hidden_size;
+        int scatter_blocks = (total_elements + threads - 1) / threads;
+        CHECK_CUDA(scatter_add_kernel<<<scatter_blocks, threads>>>(
+            curr_output.data(), 
+            y.data(), 
+            (int*)indices_map_.data(), 
+            top_k_weights_.data(), 
+            count, hidden_size
+        ));
     }
     
     // Copy router_logits to output argument if needed
@@ -401,7 +229,7 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
         router_logits = router_logits_.copy();
     } else {
         // Caller allocated, copy data.
-        cudaMemcpy(router_logits.data(), router_logits_.data(), router_logits_.size() * sizeof(float), cudaMemcpyDeviceToDevice);
+        CHECK_CUDA(cudaMemcpy(router_logits.data(), router_logits_.data(), router_logits_.size() * sizeof(float), cudaMemcpyDeviceToDevice));
     }
 }
 
@@ -435,9 +263,9 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
     
     // Project Q, K, V
-    q_proj_out_.resize({batch * seq_len, NUM_ATTENTION_HEADS * HEAD_DIM});
-    k_proj_out_.resize({batch * seq_len, NUM_KEY_VALUE_HEADS * HEAD_DIM});
-    v_proj_out_.resize({batch * seq_len, NUM_KEY_VALUE_HEADS * HEAD_DIM});
+    q_proj_out_ = Tensor({batch * seq_len, NUM_ATTENTION_HEADS * HEAD_DIM});
+    k_proj_out_ = Tensor({batch * seq_len, NUM_KEY_VALUE_HEADS * HEAD_DIM});
+    v_proj_out_ = Tensor({batch * seq_len, NUM_KEY_VALUE_HEADS * HEAD_DIM});
     
     tensor_ops::matmul_transposed(x_flat, q_proj_, q_proj_out_);
     tensor_ops::matmul_transposed(x_flat, k_proj_, k_proj_out_);
@@ -450,62 +278,75 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
     Tensor v_reshaped = v_proj_out_.view({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
     
     // Apply layernorm to Q and K
-    q_normed_.resize({batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM}); // TODO: undefined identifier
-    k_normed_.resize({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
+    q_normed_ = Tensor({batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM});
+    k_normed_ = Tensor({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
     q_layernorm_->forward(q_reshaped, q_normed_);
     k_layernorm_->forward(k_reshaped, k_normed_);
     
     // Transpose to (batch, num_heads, seq_len, head_dim) for attention
     // Use kernel
-    q_.resize({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM}); // TODO: undefined identifier
-    k_.resize({batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
-    v_.resize({batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
+    q_ = Tensor({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
+    k_ = Tensor({batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
+    v_ = Tensor({batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
+    
+    int threads = 256;
+    // Transpose to (batch, num_heads, seq_len, head_dim) for attention
+    // Use kernel
+    q_ = Tensor({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
+    k_ = Tensor({batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
+    v_ = Tensor({batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
     
     int threads = 256;
     int blocks_q = (batch * NUM_ATTENTION_HEADS * seq_len * HEAD_DIM + threads - 1) / threads;
     int blocks_k = (batch * NUM_KEY_VALUE_HEADS * seq_len * HEAD_DIM + threads - 1) / threads;
     
-    transpose_BSHD_BHSD_kernel<<<blocks_q, threads>>>(q_normed_.data(), q_.data(), batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM);
-    transpose_BSHD_BHSD_kernel<<<blocks_k, threads>>>(k_normed_.data(), k_.data(), batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM);
+    CHECK_CUDA(transpose_kernel<<<blocks_q, threads>>>(q_normed_.data(), q_.data(), batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM));
+    CHECK_CUDA(transpose_kernel<<<blocks_k, threads>>>(k_normed_.data(), k_.data(), batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM));
     
     // For V, we need to transpose v_reshaped (B, S, H, D) -> (B, H, S, D)
-    transpose_BSHD_BHSD_kernel<<<blocks_k, threads>>>(v_reshaped.data(), v_.data(), batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM);
+    CHECK_CUDA(transpose_kernel<<<blocks_k, threads>>>(v_reshaped.data(), v_.data(), batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM));
     
     // Apply RoPE
     tensor_ops::apply_rotary_pos_emb(q_, k_, cos, sin);
     
     // Repeat K, V for GQA
-    k_repeated_.resize({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM}); // TODO: undefined identifier
-    v_repeated_.resize({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
+    k_repeated_ = Tensor({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
+    v_repeated_ = Tensor({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
     tensor_ops::repeat_kv(k_, NUM_KEY_VALUE_GROUPS, k_repeated_);
     tensor_ops::repeat_kv(v_, NUM_KEY_VALUE_GROUPS, v_repeated_);
     
     // Compute attention: Q @ K^T
     float scale = 1.0f / std::sqrt((float)HEAD_DIM);
-    scores_.resize({batch, NUM_ATTENTION_HEADS, seq_len, seq_len}); // TODO: undefined identifier
+    scores_ = Tensor({batch, NUM_ATTENTION_HEADS, seq_len, seq_len});
     
     int blocks_scores = (batch * NUM_ATTENTION_HEADS * seq_len * seq_len + threads - 1) / threads;
-    batched_matmul_qk_kernel<<<blocks_scores, threads>>>(q_.data(), k_repeated_.data(), scores_.data(), batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM, scale); // TODO: undefined identifier
+    dim3 grid_scores((seq_len + 15)/16, (seq_len + 15)/16, batch * NUM_ATTENTION_HEADS);
+    dim3 block_scores(16, 16);
+    // Note: batched_matmul_qk_kernel signature in layer.h: (Q, K, Scores, S, D, scale)
+    // It uses 3D grid (s_k, s_q, b_h)
+    CHECK_CUDA(batched_matmul_qk_kernel<<<grid_scores, block_scores>>>(q_.data(), k_repeated_.data(), scores_.data(), seq_len, HEAD_DIM, scale));
     
-    // Apply causal mask
-    causal_mask_kernel<<<blocks_scores, threads>>>(scores_.data(), batch, NUM_ATTENTION_HEADS, seq_len); // TODO: undefined identifier
-    
-    // Softmax
-    attn_weights_.resize({batch, NUM_ATTENTION_HEADS, seq_len, seq_len}); // TODO: undefined identifier
-    tensor_ops::softmax(scores_, attn_weights_, -1);
+    // Softmax (masked)
+    // Note: masked_softmax_kernel signature in layer.h: (scores, S)
+    // It uses 2D grid (s_q, b_h)
+    dim3 grid_softmax((seq_len + 255)/256, batch * NUM_ATTENTION_HEADS);
+    CHECK_CUDA(masked_softmax_kernel<<<grid_softmax, 256>>>(scores_.data(), seq_len));
     
     // Multiply by V: attn_weights @ V
-    attn_output_.resize({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM}); // TODO: undefined identifier
-    int blocks_out = (batch * NUM_ATTENTION_HEADS * seq_len * HEAD_DIM + threads - 1) / threads;
-    batched_matmul_sv_kernel<<<blocks_out, threads>>>(attn_weights_.data(), v_repeated_.data(), attn_output_.data(), batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM); // TODO: undefined identifier
+    attn_output_ = Tensor({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
+    // Note: batched_matmul_sv_kernel signature in layer.h: (Scores, V, Out, S, D)
+    // It uses 3D grid (d, s_q, b_h)
+    dim3 grid_out((HEAD_DIM + 15)/16, (seq_len + 15)/16, batch * NUM_ATTENTION_HEADS);
+    CHECK_CUDA(batched_matmul_sv_kernel<<<grid_out, block_scores>>>(scores_.data(), v_repeated_.data(), attn_output_.data(), seq_len, HEAD_DIM));
     
     // Transpose back: (batch, num_heads, seq_len, head_dim) -> (batch, seq_len, num_heads, head_dim)
     // And flatten to (batch * seq_len, hidden_size)
     // We can transpose directly to (batch, seq_len, hidden_size) if we treat H*D as contiguous
-    attn_flat_.resize({batch * seq_len, hidden_size}); // TODO: undefined identifier
-    transpose_BHSD_BSHD_kernel<<<blocks_out, threads>>>(attn_output_.data(), attn_flat_.data(), batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM);
+    attn_flat_ = Tensor({batch * seq_len, hidden_size});
+    int blocks_tb = (batch * NUM_ATTENTION_HEADS * seq_len * HEAD_DIM + threads - 1) / threads;
+    CHECK_CUDA(transpose_back_kernel<<<blocks_tb, threads>>>(attn_output_.data(), attn_flat_.data(), batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM));
     
-    output_flat_.resize({batch * seq_len, hidden_size}); // TODO: undefined identifier
+    output_flat_ = Tensor({batch * seq_len, hidden_size});
     tensor_ops::matmul_transposed(attn_flat_, o_proj_, output_flat_);
     
     output_flat_.reshape({batch, seq_len, hidden_size});
@@ -515,7 +356,7 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
         output = Tensor({batch, seq_len, hidden_size});
     }
     // Copy result
-    cudaMemcpy(output.data(), output_flat_.data(), output.size() * sizeof(float), cudaMemcpyDeviceToDevice);
+    CHECK_CUDA(cudaMemcpy(output.data(), output_flat_.data(), output.size() * sizeof(float), cudaMemcpyDeviceToDevice));
 }
 
 // ShortConv implementation
@@ -558,7 +399,7 @@ void ShortConv::forward(const Tensor& x, Tensor& y) {
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
     
     // in_proj: (batch*seq_len, hidden_size) @ (3*hidden_size, hidden_size)^T -> (batch*seq_len, 3*hidden_size)
-    in_proj_out_.resize({batch * seq_len, 3 * hidden_size}); // TODO: undefined identifier
+    in_proj_out_ = Tensor({batch * seq_len, 3 * hidden_size});
     tensor_ops::matmul_transposed(x_flat, in_proj_weight_, in_proj_out_);
     
     // Add bias if present
@@ -566,66 +407,29 @@ void ShortConv::forward(const Tensor& x, Tensor& y) {
         tensor_ops::add_bias(in_proj_out_, in_proj_bias_, in_proj_out_);
     }
     
-    // Reshape to (batch, seq_len, 3*hidden_size)
-    // Then Transpose to (batch, 3*hidden_size, seq_len) -> (B, C, S)
-    // Use kernel
-    BCx_.resize({batch, 3 * hidden_size, seq_len}); // TODO: undefined identifier
-    int threads = 256;
-    int blocks = (batch * 3 * hidden_size * seq_len + threads - 1) / threads;
-    transpose_BSC_BCS_kernel<<<blocks, threads>>>(in_proj_out_.data(), BCx_.data(), batch, seq_len, 3 * hidden_size);
-    
-    // Split into B, C, x_gate
-    // BCx_ is (B, 3H, S). Memory layout:
-    // b=0: [3H lines of S]
-    //   h=0..H-1: B
-    //   h=H..2H-1: C
-    //   h=2H..3H-1: x_gate
-    // We copy these contiguous blocks to separate tensors.
-    
-    B_.resize({batch, hidden_size, seq_len}); // TODO: undefined identifier
-    C_.resize({batch, hidden_size, seq_len});
-    x_gate_.resize({batch, hidden_size, seq_len});
-    
-    // 3*Batch cudaMemcpys
-    for (size_t b = 0; b < batch; b++) {
-        size_t batch_offset = b * 3 * hidden_size * seq_len;
-        size_t size_per_part = hidden_size * seq_len * sizeof(float);
-        
-        cudaMemcpy(B_.data() + b * hidden_size * seq_len, 
-                   BCx_.data() + batch_offset, 
-                   size_per_part, cudaMemcpyDeviceToDevice);
-                   
-        cudaMemcpy(C_.data() + b * hidden_size * seq_len, 
-                   BCx_.data() + batch_offset + hidden_size * seq_len, 
-                   size_per_part, cudaMemcpyDeviceToDevice);
-                   
-        cudaMemcpy(x_gate_.data() + b * hidden_size * seq_len, 
-                   BCx_.data() + batch_offset + 2 * hidden_size * seq_len, 
-                   size_per_part, cudaMemcpyDeviceToDevice);
-    }
-    
+
     // Bx = B * x_gate (element-wise)
-    Bx_.resize({batch, hidden_size, seq_len}); // TODO: undefined identifier
-    tensor_ops::mul(B_, x_gate_, Bx_);
+    Bx_ = Tensor({batch, hidden_size, seq_len});
+    C_ = Tensor({batch, hidden_size, seq_len}); // This will hold C in [B, H, S] layout
+    
+    int total_elements = batch * seq_len * hidden_size;
+    int gating_blocks = (total_elements + threads - 1) / threads;
+    CHECK_CUDA(pre_conv_gating_kernel<<<gating_blocks, threads>>>(in_proj_out_.data(), Bx_.data(), C_.data(), batch, seq_len, hidden_size));
     
     // Apply causal conv1d on Bx
-    conv_out_.resize({batch, hidden_size, seq_len}); // TODO: undefined identifier
+    conv_out_ = Tensor({batch, hidden_size, seq_len});
     tensor_ops::causal_conv1d(Bx_, conv_weight_, USE_CONV_BIAS ? &conv_bias_ : nullptr, conv_out_);
     
     // y_pre = C * conv_out (element-wise)
-    y_pre_.resize({batch, hidden_size, seq_len}); // TODO: undefined identifier
-    tensor_ops::mul(C_, conv_out_, y_pre_);
-    
-    // Transpose back: (batch, hidden_size, seq_len) -> (batch, seq_len, hidden_size)
-    y_pre_transposed_.resize({batch, seq_len, hidden_size}); // TODO: undefined identifier
-    transpose_BCS_BSC_kernel<<<blocks, threads>>>(y_pre_.data(), y_pre_transposed_.data(), batch, hidden_size, seq_len);
+    // post_conv_gating_kernel takes (ConvOut, C, Y_pre).
+    y_pre_ = Tensor({batch, seq_len, hidden_size}); // [B, S, H]
+    CHECK_CUDA(post_conv_gating_kernel<<<gating_blocks, threads>>>(conv_out_.data(), C_.data(), y_pre_.data(), batch, seq_len, hidden_size));
     
     // out_proj
-    // Copy transposed data to flat buffer
-    y_pre_flat_.resize({batch * seq_len, hidden_size}); // TODO: undefined identifier
+    // y_pre_ is already [B, S, H] (flat).
     
-    y_flat_.resize({batch * seq_len, hidden_size}); // TODO: undefined identifier
-    tensor_ops::matmul_transposed(y_pre_transposed_.view({batch * seq_len, hidden_size}), out_proj_weight_, y_flat_);
+    y_flat_ = Tensor({batch * seq_len, hidden_size});
+    tensor_ops::matmul_transposed(y_pre_.view({batch * seq_len, hidden_size}), out_proj_weight_, y_flat_);
     
     // Add bias if present
     if (USE_CONV_BIAS && out_proj_bias_.size() > 0) {
@@ -638,7 +442,8 @@ void ShortConv::forward(const Tensor& x, Tensor& y) {
     if (y.size() == 0) {
         y = Tensor({batch, seq_len, hidden_size});
     }
-    cudaMemcpy(y.data(), y_flat_.data(), y.size() * sizeof(float), cudaMemcpyDeviceToDevice);
+    CHECK_CUDA(cudaMemcpy(y.data(), y_flat_.data(), y.size() * sizeof(float), cudaMemcpyDeviceToDevice));
+
 }
 
 // DecoderLayer implementation
@@ -749,20 +554,9 @@ void LFM2Model::load_layers() {
     }
 }
 
-// TODO: delete all below and re-implement from original baseline
-
 void LFM2Model::load_output_layers() {
-    // Load embedding
-    embedding_ = Tensor::load_from_file("model.embed_tokens.weight");
-    
-    // Load layers
-    layers_.reserve(NUM_LAYERS);
-    for (int i = 0; i < NUM_LAYERS; i++) {
-        layers_.push_back(std::make_unique<DecoderLayer>(i));
-    }
-    
     // Load norm
-    norm_ = std::make_unique<RMSNorm>("model.norm.weight");
+    norm_ = std::make_unique<RMSNorm>("norm.weight");
     
     // Load lm_head
     lm_head_ = Tensor::load_from_file("lm_head.weight");
@@ -774,42 +568,30 @@ void LFM2Model::forward(const std::vector<int>& tokens, Tensor& logits) {
     
     // Allocate input ids on GPU
     int* d_tokens;
-    cudaMalloc(&d_tokens, seq_len * sizeof(int));
-    cudaMemcpy(d_tokens, tokens.data(), seq_len * sizeof(int), cudaMemcpyHostToDevice);
+    CHECK_CUDA(cudaMalloc(&d_tokens, seq_len * sizeof(int)));
+    CHECK_CUDA(cudaMemcpy(d_tokens, tokens.data(), seq_len * sizeof(int), cudaMemcpyHostToDevice));
     
     // Embedding lookup
     Tensor x({batch, seq_len, HIDDEN_SIZE});
     int threads = 256;
     int blocks = (batch * seq_len * HIDDEN_SIZE + threads - 1) / threads;
-    embedding_kernel<<<blocks, threads>>>(d_tokens, embedding_.data(), x.data(), batch, seq_len, HIDDEN_SIZE);
+    embedding_kernel<<<blocks, threads>>>(d_tokens, embed_tokens_.data(), x.data(), batch, seq_len, HIDDEN_SIZE);
     
-    cudaFree(d_tokens);
+    CHECK_CUDA(cudaFree(d_tokens));
     
     // Precompute RoPE cos/sin
     Tensor cos({seq_len, HEAD_DIM / 2});
     Tensor sin({seq_len, HEAD_DIM / 2});
-    tensor_ops::compute_rope_embeddings(cos, sin, seq_len, HEAD_DIM, ROPE_THETA);
+    // Correct signature: (head_dim, max_seq_len, theta, cos, sin)
+    tensor_ops::compute_rope_embeddings(HEAD_DIM, seq_len, ROPE_THETA, cos, sin);
     
     // Forward through layers
     for (auto& layer : layers_) {
         Tensor layer_out; // Temporary output
         layer->forward(x, cos, sin, nullptr, layer_out); // Pass nullptr for mask for now (causal mask handled in attn)
-        // Update x (residual connection is inside layer? No, DecoderLayer::forward does residual)
-        // Wait, DecoderLayer::forward signature:
-        // void forward(const Tensor& x, ..., Tensor& output);
-        // It usually adds residual.
-        // Let's check DecoderLayer::forward in src/model.cu (it's below).
-        // It calls attn and moe/mlp.
-        // We need to make sure x is updated.
-        // Actually, usually we do x = layer(x).
-        // If DecoderLayer writes to `output`, we should swap or copy.
-        // Let's look at DecoderLayer::forward.
-        // It takes `x` and writes to `output`.
-        // So we should do:
-        // layer->forward(x, ..., temp);
-        // x = temp; (move or copy)
-        Tensor temp_x = x; // Create a temporary copy of x for the layer input
-        x = std::move(layer_out); // Move layer_out to x for the next iteration
+        
+        // Update x (DecoderLayer adds residual, so layer_out is the new hidden state)
+        x = std::move(layer_out);
     }
     
     // Final norm
@@ -832,5 +614,5 @@ void LFM2Model::forward(const std::vector<int>& tokens, Tensor& logits) {
     if (logits.size() == 0) {
         logits = Tensor({batch, seq_len, VOCAB_SIZE});
     }
-    cudaMemcpy(logits.data(), logits_flat.data(), logits.size() * sizeof(float), cudaMemcpyDeviceToDevice);
+    CHECK_CUDA(cudaMemcpy(logits.data(), logits_flat.data(), logits.size() * sizeof(float), cudaMemcpyDeviceToDevice));
 }

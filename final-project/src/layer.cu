@@ -214,6 +214,225 @@ __global__ void causal_conv1d_kernel(const float *x, const float *w, const float
 }
 
 // ============================================================================
+// Shared Kernels from Tests
+// ============================================================================
+
+__global__ void embedding_kernel(int *input_ids, float *embedding_table, float *output, int batch, int seq_len, int hidden_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * seq_len * hidden_size;
+    if (idx < total) {
+        int h = idx % hidden_size;
+        int rem = idx / hidden_size;
+        int s = rem % seq_len;
+        int b = rem / seq_len;
+        
+        int token_id = input_ids[b * seq_len + s];
+        output[idx] = embedding_table[token_id * hidden_size + h];
+    }
+}
+
+// --- Attention Kernels ---
+
+__global__ void transpose_kernel(float *in, float *out, int B, int S, int H, int D) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = B * S * H * D;
+    if (idx < total) {
+        int d = idx % D;
+        int rem = idx / D;
+        int h = rem % H;
+        rem /= H;
+        int s = rem % S;
+        int b = rem / S;
+        // in: [B, S, H, D] -> out: [B, H, S, D]
+        out[b * (H * S * D) + h * (S * D) + s * D + d] = in[idx];
+    }
+}
+
+__global__ void transpose_back_kernel(float *in, float *out, int B, int H, int S, int D) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = B * H * S * D;
+    if (idx < total) {
+        int d = idx % D;
+        int rem = idx / D;
+        int s = rem % S;
+        rem /= S;
+        int h = rem % H;
+        int b = rem / H;
+        // in: [B, H, S, D] -> out: [B, S, H, D]
+        out[b * (S * H * D) + s * (H * D) + h * D + d] = in[idx];
+    }
+}
+
+__global__ void batched_matmul_qk_kernel(float *Q, float *K, float *Scores, int S, int D, float scale) {
+    int s_k = blockIdx.x * blockDim.x + threadIdx.x;
+    int s_q = blockIdx.y * blockDim.y + threadIdx.y;
+    int b_h = blockIdx.z;
+    
+    if (s_q < S && s_k < S) {
+        float sum = 0.0f;
+        int offset = b_h * S * D;
+        for (int i = 0; i < D; ++i) {
+            sum += Q[offset + s_q * D + i] * K[offset + s_k * D + i];
+        }
+        Scores[b_h * S * S + s_q * S + s_k] = sum * scale;
+    }
+}
+
+__global__ void masked_softmax_kernel(float *scores, int S) {
+    int b_h = blockIdx.y;
+    int s_q = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (s_q < S) {
+        float *row = scores + b_h * S * S + s_q * S;
+        float max_val = -1e20f;
+        for (int s_k = 0; s_k < S; ++s_k) {
+            if (s_k > s_q) row[s_k] = -INFINITY;
+            if (row[s_k] > max_val) max_val = row[s_k];
+        }
+        float sum = 0.0f;
+        for (int s_k = 0; s_k < S; ++s_k) {
+            if (s_k <= s_q) {
+                row[s_k] = expf(row[s_k] - max_val);
+                sum += row[s_k];
+            } else {
+                row[s_k] = 0.0f;
+            }
+        }
+        for (int s_k = 0; s_k < S; ++s_k) row[s_k] /= sum;
+    }
+}
+
+__global__ void batched_matmul_sv_kernel(float *Scores, float *V, float *Out, int S, int D) {
+    int d = blockIdx.x * blockDim.x + threadIdx.x;
+    int s_q = blockIdx.y * blockDim.y + threadIdx.y;
+    int b_h = blockIdx.z;
+    
+    if (s_q < S && d < D) {
+        float sum = 0.0f;
+        int scores_off = b_h * S * S + s_q * S;
+        int v_off = b_h * S * D;
+        for (int s_k = 0; s_k < S; ++s_k) {
+            sum += Scores[scores_off + s_k] * V[v_off + s_k * D + d];
+        }
+        Out[b_h * S * D + s_q * D + d] = sum;
+    }
+}
+
+// --- Conv Kernels ---
+
+__global__ void pre_conv_gating_kernel(float *in_proj_out, float *Bx, float *C_out, int batch, int seq_len, int hidden_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * seq_len * hidden_size;
+    if (idx < total) {
+        int h = idx % hidden_size;
+        int rem = idx / hidden_size;
+        int s = rem % seq_len;
+        int b = rem / seq_len;
+        
+        int in_base = b * (seq_len * 3 * hidden_size) + s * (3 * hidden_size);
+        float val_B = in_proj_out[in_base + h];
+        float val_C = in_proj_out[in_base + hidden_size + h];
+        float val_X = in_proj_out[in_base + 2 * hidden_size + h];
+        
+        int out_idx = b * (hidden_size * seq_len) + h * seq_len + s;
+        Bx[out_idx] = val_B * val_X;
+        C_out[out_idx] = val_C;
+    }
+}
+
+__global__ void post_conv_gating_kernel(float *ConvOut, float *C, float *Y_pre, int batch, int seq_len, int hidden_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * hidden_size * seq_len;
+    if (idx < total) {
+        int s = idx % seq_len;
+        int rem = idx / seq_len;
+        int h = rem % hidden_size;
+        int b = rem / hidden_size;
+        
+        int in_idx = b * (hidden_size * seq_len) + h * seq_len + s;
+        float val = ConvOut[in_idx] * C[in_idx];
+        
+        int out_idx = b * (seq_len * hidden_size) + s * hidden_size + h;
+        Y_pre[out_idx] = val;
+    }
+}
+
+// --- MoE Kernels ---
+
+__global__ void router_kernel(float *logits, float *bias, int *top_k_indices, float *top_k_weights, 
+                              int num_tokens, int num_experts, int k, bool use_bias) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t < num_tokens) {
+        float *my_logits = logits + t * num_experts;
+        unsigned long long mask = 0;
+        
+        for (int i = 0; i < k; ++i) {
+            float max_score = -1e20f;
+            int max_idx = -1;
+            float max_weight = 0.0f;
+            
+            for (int e = 0; e < num_experts; ++e) {
+                if (!((mask >> e) & 1)) {
+                    float logit = my_logits[e];
+                    float weight = 1.0f / (1.0f + expf(-logit));
+                    float score = weight;
+                    if (use_bias) score += bias[e];
+                    
+                    if (score > max_score) {
+                        max_score = score;
+                        max_idx = e;
+                        max_weight = weight;
+                    }
+                }
+            }
+            
+            if (max_idx != -1) {
+                top_k_indices[t * k + i] = max_idx;
+                top_k_weights[t * k + i] = max_weight;
+                mask |= (1ULL << max_idx);
+            }
+        }
+        
+        float sum = 0.0f;
+        for (int i = 0; i < k; ++i) sum += top_k_weights[t * k + i];
+        if (sum > 1e-6f) {
+            for (int i = 0; i < k; ++i) top_k_weights[t * k + i] /= sum;
+        }
+    }
+}
+
+__global__ void gather_kernel(float *x, float *expert_in, int *indices, int count, int hidden_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < count) {
+        int token_idx = indices[idx];
+        for (int h = 0; h < hidden_size; ++h) {
+            expert_in[idx * hidden_size + h] = x[token_idx * hidden_size + h];
+        }
+    }
+}
+
+__global__ void silu_mul_kernel(float *gate, float *up, float *out, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float g = gate[idx];
+        float u = up[idx];
+        float sig = 1.0f / (1.0f + expf(-g));
+        out[idx] = (g * sig) * u;
+    }
+}
+
+__global__ void scatter_add_kernel(float *expert_out, float *output, int *indices, float *weights, int count, int hidden_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < count) {
+        int token_idx = indices[idx];
+        float w = weights[idx];
+        for (int h = 0; h < hidden_size; ++h) {
+            atomicAdd(&output[token_idx * hidden_size + h], expert_out[idx * hidden_size + h] * w);
+        }
+    }
+}
+
+// ============================================================================
 // Tensor Operations - Basic operations on tensors
 // ============================================================================
 
@@ -268,7 +487,7 @@ void add_bias(const Tensor& a, const Tensor& bias, Tensor& c) {
     
     // Ensure c contains a's data if not in-place
     if (c.data() != a.data()) {
-        cudaMemcpy(c.data(), a.data(), a.size() * sizeof(float), cudaMemcpyDeviceToDevice);
+        CHECK_CUDA(cudaMemcpy(c.data(), a.data(), a.size() * sizeof(float), cudaMemcpyDeviceToDevice));
     }
     add_bias_kernel<<<blocks, threads>>>(c.data(), bias.data(), rows, cols);
 }
@@ -364,7 +583,7 @@ void apply_rotary_pos_emb(Tensor& q, Tensor& k, const Tensor& cos, const Tensor&
 // Grouped Query Attention operations
 void repeat_kv(const Tensor& x, size_t n_rep, Tensor& y) {
     if (n_rep == 1) {
-        cudaMemcpy(y.data(), x.data(), x.size() * sizeof(float), cudaMemcpyDeviceToDevice);
+        CHECK_CUDA(cudaMemcpy(y.data(), x.data(), x.size() * sizeof(float), cudaMemcpyDeviceToDevice));
         return;
     }
     
@@ -437,8 +656,8 @@ void RotaryEmbedding::forward(size_t seq_len, Tensor& cos, Tensor& sin) {
     
     // cos: (seq_len, head_dim)
     size_t copy_size = seq_len * HEAD_DIM * sizeof(float);
-    cudaMemcpy(cos.data(), cos_cached_.data(), copy_size, cudaMemcpyDeviceToDevice);
-    cudaMemcpy(sin.data(), sin_cached_.data(), copy_size, cudaMemcpyDeviceToDevice);
+    CHECK_CUDA(cudaMemcpy(cos.data(), cos_cached_.data(), copy_size, cudaMemcpyDeviceToDevice));
+    CHECK_CUDA(cudaMemcpy(sin.data(), sin_cached_.data(), copy_size, cudaMemcpyDeviceToDevice));
 }
 
 
