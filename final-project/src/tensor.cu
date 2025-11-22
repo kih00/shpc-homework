@@ -274,3 +274,17 @@ void Tensor::ones() {
     fill(1.0f);
 }
 
+void Tensor::copy_from_host(const void* src, size_t size) {
+    if (size > size_ * sizeof(float)) {
+        throw std::out_of_range("Source size exceeds tensor size");
+    }
+    CHECK_CUDA(cudaMemcpy(data_, src, size, cudaMemcpyHostToDevice));
+}
+
+void Tensor::copy_to_host(void* dst, size_t size) const {
+    if (size > size_ * sizeof(float)) {
+        throw std::out_of_range("Destination size exceeds tensor size");
+    }
+    CHECK_CUDA(cudaMemcpy(dst, data_, size, cudaMemcpyDeviceToHost));
+}
+

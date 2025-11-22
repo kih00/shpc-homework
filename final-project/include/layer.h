@@ -10,6 +10,7 @@ class RMSNorm {
 public:
     RMSNorm(const std::string& weight_file);
     void forward(const Tensor& x, Tensor& y);
+    const Tensor& weight() const { return weight_; }
     
 private:
     Tensor weight_;
@@ -32,6 +33,9 @@ class MLP {
 public:
     MLP(const std::string& w1_file, const std::string& w2_file, const std::string& w3_file);
     void forward(const Tensor& x, Tensor& y);
+    const Tensor& w1() const { return w1_; }
+    const Tensor& w2() const { return w2_; }
+    const Tensor& w3() const { return w3_; }
     
 private:
     Tensor w1_;  // up projection
@@ -52,15 +56,11 @@ private:
     
     void route_tokens(const Tensor& router_logits, std::vector<int>& top_k_indices,
                      std::vector<float>& top_k_weights);
-    
-    // Persistent buffers
-    Tensor router_logits_;
-    Tensor top_k_indices_;
-    Tensor top_k_weights_;
-    Tensor expert_input_;
-    Tensor expert_output_;
-    Tensor indices_map_;
-    Tensor d_count_tensor_; // Use Tensor to manage int memory (4 bytes)
+                     
+    // MoE kernel wrapper
+    void moe(float *x, float *gate, float **expert_w1, float **expert_w2, float **expert_w3,
+             float *expert_bias, float *output, float *router_logits_out, int batch, int seq_len, int hidden_size, 
+             int num_experts, int num_experts_per_tok, int expert_hidden_size);
 };
 
 // Multi-Head Attention
@@ -71,30 +71,13 @@ public:
                  const Tensor* attention_mask, Tensor& output);
     
 private:
-    int layer_idx_;
     Tensor q_proj_;
     Tensor k_proj_;
     Tensor v_proj_;
     Tensor o_proj_;
     std::unique_ptr<RMSNorm> q_layernorm_;
     std::unique_ptr<RMSNorm> k_layernorm_;
-    
-    // Persistent buffers
-    Tensor q_proj_out_;
-    Tensor k_proj_out_;
-    Tensor v_proj_out_;
-    Tensor q_normed_;
-    Tensor k_normed_;
-    Tensor q_;
-    Tensor k_;
-    Tensor v_;
-    Tensor k_repeated_;
-    Tensor v_repeated_;
-    Tensor scores_;
-    Tensor attn_weights_;
-    Tensor attn_output_;
-    Tensor attn_flat_;
-    Tensor output_flat_;
+    int layer_idx_;
 };
 
 // Short Convolution (Mamba-style)
@@ -104,26 +87,13 @@ public:
     void forward(const Tensor& x, Tensor& y);
     
 private:
-    int layer_idx_;
     Tensor conv_weight_;
-    Tensor in_proj_weight_;
-    Tensor out_proj_weight_;
     Tensor conv_bias_;
+    Tensor in_proj_weight_;
     Tensor in_proj_bias_;
+    Tensor out_proj_weight_;
     Tensor out_proj_bias_;
-    
-    // Persistent buffers
-    Tensor in_proj_out_;
-    Tensor BCx_;
-    Tensor B_;
-    Tensor C_;
-    Tensor x_gate_;
-    Tensor Bx_;
-    Tensor conv_out_;
-    Tensor y_pre_;
-    Tensor y_pre_transposed_;
-    Tensor y_pre_flat_;
-    Tensor y_flat_;
+    int layer_idx_;
 };
 
 // Decoder Layer

@@ -77,6 +77,10 @@ public:
     void fill(float value);
     void zero();
     void ones();
+    
+    // Data transfer
+    void copy_from_host(const void* src, size_t size);
+    void copy_to_host(void* dst, size_t size) const;
 
 private:
     std::vector<size_t> shape_;
