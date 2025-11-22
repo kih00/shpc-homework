@@ -10,6 +10,7 @@ class RMSNorm {
 public:
     RMSNorm(const std::string& weight_file);
     void forward(const Tensor& x, Tensor& y);
+    
     const Tensor& weight() const { return weight_; }
     
 private:
@@ -33,6 +34,7 @@ class MLP {
 public:
     MLP(const std::string& w1_file, const std::string& w2_file, const std::string& w3_file);
     void forward(const Tensor& x, Tensor& y);
+    
     const Tensor& w1() const { return w1_; }
     const Tensor& w2() const { return w2_; }
     const Tensor& w3() const { return w3_; }
@@ -47,6 +49,7 @@ private:
 class SparseMoeBlock {
 public:
     SparseMoeBlock(int layer_idx);
+    ~SparseMoeBlock();
     void forward(const Tensor& x, Tensor& y, Tensor& router_logits);
     
 private:
@@ -54,13 +57,16 @@ private:
     std::vector<MLP> experts_;
     Tensor expert_bias_;  // optional
     
+    // Device pointers for MoE kernel
+    float** w1_ptrs_ = nullptr;
+    float** w2_ptrs_ = nullptr;
+    float** w3_ptrs_ = nullptr;
+    float** w1_ptrs_gpu_ = nullptr;
+    float** w2_ptrs_gpu_ = nullptr;
+    float** w3_ptrs_gpu_ = nullptr;
+    
     void route_tokens(const Tensor& router_logits, std::vector<int>& top_k_indices,
                      std::vector<float>& top_k_weights);
-                     
-    // MoE kernel wrapper
-    void moe(float *x, float *gate, float **expert_w1, float **expert_w2, float **expert_w3,
-             float *expert_bias, float *output, float *router_logits_out, int batch, int seq_len, int hidden_size, 
-             int num_experts, int num_experts_per_tok, int expert_hidden_size);
 };
 
 // Multi-Head Attention

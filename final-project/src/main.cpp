@@ -206,11 +206,8 @@ int main(int argc, char* argv[]) {
             model.forward(input_ids_vec, logits);
             
             // Copy logits to output buffer
-            std::vector<float> host_logits(VOCAB_SIZE);
-            CHECK_CUDA(cudaMemcpy(host_logits.data(), logits.data(), VOCAB_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
-            
             for (size_t i = 0; i < VOCAB_SIZE; i++) {
-                outputs[sample_idx * VOCAB_SIZE + i] = host_logits[i];
+                outputs[sample_idx * VOCAB_SIZE + i] = logits.at(0, i);
             }
         }
     }

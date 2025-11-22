@@ -1,38 +1,43 @@
 #include "model.h"
 #include "model_loader.h"
+#include "layer.h"
+#include "tensor.h"
+#include <cmath>
 #include <iostream>
-#include <fstream>
 #include <sstream>
-#include <algorithm>
-#include <random>
-#include <cstring>
+#include <cuda_runtime.h>
+
+#define CHECK_CUDA(call)                                              \
+  do {                                                                \
+    cudaError_t status_ = call;                                       \
+    if (status_ != cudaSuccess) {                                     \
+      fprintf(stderr, "CUDA error (%s:%d): %s\n", __FILE__, __LINE__, \
+              cudaGetErrorString(status_));                           \
+      exit(EXIT_FAILURE);                                             \
+    }                                                                 \
+  } while (0)
 
 // Global model loader (definition)
 std::unique_ptr<ModelLoader> g_model_loader;
 
 // ============================================================================
-// Large Block Implementations - Complex layers and modules
+// MLP
 // ============================================================================
 
-// MLP (Feed-Forward Network) implementation
 MLP::MLP(const std::string& w1_file, const std::string& w2_file, const std::string& w3_file) {
-    w1_ = Tensor::load_from_file(w1_file);
-    w2_ = Tensor::load_from_file(w2_file);
-    w3_ = Tensor::load_from_file(w3_file);
+    w1_ = Tensor::load_from_file(w1_file, nullptr);  // Uses global g_model_loader
+    w2_ = Tensor::load_from_file(w2_file, nullptr);
+    w3_ = Tensor::load_from_file(w3_file, nullptr);
 }
 
 void MLP::forward(const Tensor& x, Tensor& y) {
     // x: (batch, seq_len, hidden_size)
-    // w1: (intermediate_size, hidden_size)
-    // w3: (intermediate_size, hidden_size)
-    // w2: (hidden_size, intermediate_size)
-    
     size_t batch = x.size(0);
     size_t seq_len = x.size(1);
     size_t hidden_size = x.size(2);
     size_t intermediate_size = w1_.size(0);
     
-    // Flatten batch and seq_len
+    // Flatten
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
     
     // gate = silu(x @ w1.T)
@@ -53,24 +58,19 @@ void MLP::forward(const Tensor& x, Tensor& y) {
     Tensor y_flat({batch * seq_len, hidden_size});
     tensor_ops::matmul_transposed(hidden, w2_, y_flat);
     
-    // Reshape and assign to output
     y_flat.reshape({batch, seq_len, hidden_size});
-    
-    // If y is not allocated, allocate it
-    if (y.size() == 0) {
-        y = Tensor({batch, seq_len, hidden_size});
-    }
-    std::memcpy(y.data(), y_flat.data(), y.size() * sizeof(float));
+    y = y_flat.copy();
 }
 
-// SparseMoeBlock implementation
+// ============================================================================
+// SparseMoeBlock
+// ============================================================================
+
 SparseMoeBlock::SparseMoeBlock(int layer_idx) {
-    // Load gate weights (router)
     std::stringstream ss;
     ss << "layers." << layer_idx << ".feed_forward.gate.weight";
-    gate_ = Tensor::load_from_file(ss.str());
+    gate_ = Tensor::load_from_file(ss.str(), nullptr);  // Uses global g_model_loader
     
-    // Load expert weights
     experts_.reserve(NUM_EXPERTS);
     for (size_t i = 0; i < NUM_EXPERTS; i++) {
         std::stringstream ss_w1, ss_w2, ss_w3;
@@ -81,106 +81,78 @@ SparseMoeBlock::SparseMoeBlock(int layer_idx) {
         experts_.emplace_back(ss_w1.str(), ss_w2.str(), ss_w3.str());
     }
     
-    // Load expert bias if used
     if (USE_EXPERT_BIAS) {
         std::stringstream ss_bias;
         ss_bias << "layers." << layer_idx << ".feed_forward.expert_bias";
-        expert_bias_ = Tensor::load_from_file(ss_bias.str());
+        expert_bias_ = Tensor::load_from_file(ss_bias.str(), nullptr);  // Uses global g_model_loader
+    } else {
+        expert_bias_ = Tensor({NUM_EXPERTS});
+        expert_bias_.zero();
     }
+    
+    // Initialize GPU pointers
+    std::vector<float*> w1_ptrs_host(NUM_EXPERTS);
+    std::vector<float*> w2_ptrs_host(NUM_EXPERTS);
+    std::vector<float*> w3_ptrs_host(NUM_EXPERTS);
+    
+    for (int i = 0; i < NUM_EXPERTS; i++) {
+        w1_ptrs_host[i] = experts_[i].w1().data();
+        w2_ptrs_host[i] = experts_[i].w2().data();
+        w3_ptrs_host[i] = experts_[i].w3().data();
+    }
+    
+    CHECK_CUDA(cudaMalloc(&w1_ptrs_gpu_, NUM_EXPERTS * sizeof(float*)));
+    CHECK_CUDA(cudaMalloc(&w2_ptrs_gpu_, NUM_EXPERTS * sizeof(float*)));
+    CHECK_CUDA(cudaMalloc(&w3_ptrs_gpu_, NUM_EXPERTS * sizeof(float*)));
+    
+    CHECK_CUDA(cudaMemcpy(w1_ptrs_gpu_, w1_ptrs_host.data(), NUM_EXPERTS * sizeof(float*), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(w2_ptrs_gpu_, w2_ptrs_host.data(), NUM_EXPERTS * sizeof(float*), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(w3_ptrs_gpu_, w3_ptrs_host.data(), NUM_EXPERTS * sizeof(float*), cudaMemcpyHostToDevice));
 }
 
-void SparseMoeBlock::route_tokens(const Tensor& router_logits, 
-                                   std::vector<int>& top_k_indices,
-                                   std::vector<float>& top_k_weights) {
-    // router_logits: (batch * seq_len, num_experts)
-    size_t num_tokens = router_logits.size(0);
-    
-    top_k_indices.resize(num_tokens * NUM_EXPERTS_PER_TOK);
-    top_k_weights.resize(num_tokens * NUM_EXPERTS_PER_TOK);
-    
-    for (size_t t = 0; t < num_tokens; t++) {
-        // Apply sigmoid to get routing weights
-        std::vector<float> routing_weights(NUM_EXPERTS);
-        for (size_t e = 0; e < NUM_EXPERTS; e++) {
-            float logit = router_logits.at(t, e);
-            routing_weights[e] = 1.0f / (1.0f + std::exp(-logit));
-        }
-        
-        // Prepare scores for selection (with bias if used)
-        std::vector<std::pair<float, int>> scores(NUM_EXPERTS);
-        if (USE_EXPERT_BIAS) {
-            for (size_t e = 0; e < NUM_EXPERTS; e++) {
-                scores[e] = {routing_weights[e] + expert_bias_[e], e};
-            }
-        } else {
-            for (size_t e = 0; e < NUM_EXPERTS; e++) {
-                scores[e] = {routing_weights[e], e};
-            }
-        }
-        
-        // Sort and get top-k based on scores
-        std::partial_sort(scores.begin(), scores.begin() + NUM_EXPERTS_PER_TOK, scores.end(),
-                         [](const auto& a, const auto& b) { return a.first > b.first; });
-        
-        // Get selected expert indices and their routing weights (from original sigmoid, not with bias)
-        std::vector<float> selected_weights(NUM_EXPERTS_PER_TOK);
-        for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; k++) {
-            int expert_idx = scores[k].second;
-            top_k_indices[t * NUM_EXPERTS_PER_TOK + k] = expert_idx;
-            selected_weights[k] = routing_weights[expert_idx];  // Use original sigmoid weight
-        }
-        
-        // Normalize by sum (not softmax!) - matches Python: routing_weights / routing_weights.sum()
-        if (NORM_TOPK_PROB) {
-            float sum = 0.0f;
-            for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; k++) {
-                sum += selected_weights[k];
-            }
-            if (sum > 1e-6f) {  // Python uses 1e-6 epsilon
-                for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; k++) {
-                    selected_weights[k] /= sum;
-                }
-            }
-        }
-        
-        // Apply scaling factor and store
-        for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; k++) {
-            top_k_weights[t * NUM_EXPERTS_PER_TOK + k] = selected_weights[k] * ROUTED_SCALING_FACTOR;
-        }
-    }
+SparseMoeBlock::~SparseMoeBlock() {
+    if (w1_ptrs_gpu_) cudaFree(w1_ptrs_gpu_);
+    if (w2_ptrs_gpu_) cudaFree(w2_ptrs_gpu_);
+    if (w3_ptrs_gpu_) cudaFree(w3_ptrs_gpu_);
 }
 
 void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) {
-    // x: (batch, seq_len, hidden_size)
     size_t batch = x.size(0);
     size_t seq_len = x.size(1);
     size_t hidden_size = x.size(2);
     
-    // Initialize output
-    if (y.size() == 0) {
-        y = Tensor({batch, seq_len, hidden_size});
-    }
+    Tensor x_flat = x.view({batch * seq_len, hidden_size});
     
-    // Prepare expert weights pointers
-    std::vector<float*> w1_ptrs(NUM_EXPERTS);
-    std::vector<float*> w2_ptrs(NUM_EXPERTS);
-    std::vector<float*> w3_ptrs(NUM_EXPERTS);
+    router_logits = Tensor({batch * seq_len, NUM_EXPERTS});
+    tensor_ops::matmul_transposed(x_flat, gate_, router_logits);
     
-    for (size_t i = 0; i < NUM_EXPERTS; i++) {
-        w1_ptrs[i] = experts_[i].w1().data();
-        w2_ptrs[i] = experts_[i].w2().data();
-        w3_ptrs[i] = experts_[i].w3().data();
-    }
+    Tensor top_k_indices_tensor({batch * seq_len, NUM_EXPERTS_PER_TOK});
+    Tensor top_k_weights_tensor({batch * seq_len, NUM_EXPERTS_PER_TOK});
     
-    // Call MoE wrapper
-    moe(x.data(), gate_.data(), w1_ptrs.data(), w2_ptrs.data(), w3_ptrs.data(),
-        expert_bias_.data(), y.data(), router_logits.data(), batch, seq_len, hidden_size,
-        NUM_EXPERTS, NUM_EXPERTS_PER_TOK, EXPERT_HIDDEN_SIZE);
-        
-    // Note: router_logits is not populated by the kernel wrapper as per test signature
+    tensor_ops::route_tokens(router_logits, expert_bias_, 
+                            top_k_indices_tensor, top_k_weights_tensor,
+                            batch * seq_len, NUM_EXPERTS, NUM_EXPERTS_PER_TOK);
+    
+    y = Tensor({batch, seq_len, hidden_size});
+    y.zero();
+    
+    size_t intermediate_size = experts_[0].w1().size(0);
+    tensor_ops::moe_expert_dispatch(x_flat, top_k_indices_tensor, top_k_weights_tensor,
+                                    w1_ptrs_gpu_, w2_ptrs_gpu_, w3_ptrs_gpu_,
+                                    y,
+                                    batch * seq_len, hidden_size, intermediate_size,
+                                    NUM_EXPERTS_PER_TOK, seq_len);
 }
 
-// Attention implementation
+void SparseMoeBlock::route_tokens(const Tensor& router_logits, std::vector<int>& top_k_indices,
+                                  std::vector<float>& top_k_weights) {
+    // Deprecated - GPU version used
+}
+
+// ============================================================================
+// Attention
+// ============================================================================
+
 Attention::Attention(int layer_idx) : layer_idx_(layer_idx) {
     std::stringstream ss_q, ss_k, ss_v, ss_o, ss_q_ln, ss_k_ln;
     ss_q << "layers." << layer_idx << ".self_attn.q_proj.weight";
@@ -190,84 +162,67 @@ Attention::Attention(int layer_idx) : layer_idx_(layer_idx) {
     ss_q_ln << "layers." << layer_idx << ".self_attn.q_layernorm.weight";
     ss_k_ln << "layers." << layer_idx << ".self_attn.k_layernorm.weight";
     
-    q_proj_ = Tensor::load_from_file(ss_q.str());
-    k_proj_ = Tensor::load_from_file(ss_k.str());
-    v_proj_ = Tensor::load_from_file(ss_v.str());
-    o_proj_ = Tensor::load_from_file(ss_o.str());
+    q_proj_ = Tensor::load_from_file(ss_q.str(), nullptr);  // Uses global g_model_loader
+    k_proj_ = Tensor::load_from_file(ss_k.str(), nullptr);
+    v_proj_ = Tensor::load_from_file(ss_v.str(), nullptr);
+    o_proj_ = Tensor::load_from_file(ss_o.str(), nullptr);
     
     q_layernorm_ = std::make_unique<RMSNorm>(ss_q_ln.str());
     k_layernorm_ = std::make_unique<RMSNorm>(ss_k_ln.str());
 }
 
 void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
-                       const Tensor* attention_mask, Tensor& output) {
-    // x: (batch, seq_len, hidden_size)
-    size_t batch = x.size(0);
-    size_t seq_len = x.size(1);
-    size_t hidden_size = x.size(2);
+                        const Tensor* attention_mask, Tensor& output) {
+    int batch = x.size(0);
+    int seq_len = x.size(1);
     
-    // Allocate output if needed
-    if (output.size() == 0) {
-        output = Tensor({batch, seq_len, hidden_size});
-    }
-    
-    // Call Attention wrapper
-    attn(x.data(), cos.data(), sin.data(), q_proj_.data(), k_proj_.data(),
-         v_proj_.data(), o_proj_.data(), q_layernorm_->weight().data(), k_layernorm_->weight().data(),
-         output.data(), batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM, NUM_KEY_VALUE_HEADS);
+    tensor_ops::attention(x, cos, sin, 
+                         q_proj_, k_proj_, v_proj_, o_proj_,
+                         q_layernorm_->weight(), k_layernorm_->weight(),
+                         output,
+                         batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM, NUM_KEY_VALUE_HEADS);
 }
 
-// ShortConv implementation
+// ============================================================================
+// ShortConv
+// ============================================================================
+
 ShortConv::ShortConv(int layer_idx) : layer_idx_(layer_idx) {
-    std::stringstream ss_conv, ss_in, ss_out;
-    ss_conv << "layers." << layer_idx << ".conv.conv.weight";
-    ss_in << "layers." << layer_idx << ".conv.in_proj.weight";
-    ss_out << "layers." << layer_idx << ".conv.out_proj.weight";
-    
-    conv_weight_ = Tensor::load_from_file(ss_conv.str());
-    in_proj_weight_ = Tensor::load_from_file(ss_in.str());
-    out_proj_weight_ = Tensor::load_from_file(ss_out.str());
-    
-    // Load biases if they exist
-    if (USE_CONV_BIAS) {
-        std::stringstream ss_conv_bias, ss_in_bias, ss_out_bias;
-        ss_conv_bias << "layers." << layer_idx << ".conv.conv.bias";
-        ss_in_bias << "layers." << layer_idx << ".conv.in_proj.bias";
-        ss_out_bias << "layers." << layer_idx << ".conv.out_proj.bias";
+    std::stringstream ss_conv_w, ss_conv_b, ss_in_w, ss_in_b, ss_out_w, ss_out_b;
+    ss_conv_w << "layers." << layer_idx << ".short_conv.conv_1d.weight";
+    ss_conv_b << "layers." << layer_idx << ".short_conv.conv_1d.bias";
+    ss_in_w << "layers." << layer_idx << ".short_conv.in_proj.weight";
+    ss_in_b << "layers." << layer_idx << ".short_conv.in_proj.bias";
+    ss_out_w << "layers." << layer_idx << ".short_conv.out_proj.weight";
+    ss_out_b << "layers." << layer_idx << ".short_conv.out_proj.bias";
         
-        if (g_model_loader->has_tensor(ss_conv_bias.str())) {
-            conv_bias_ = Tensor::load_from_file(ss_conv_bias.str());
-        }
-        if (g_model_loader->has_tensor(ss_in_bias.str())) {
-            in_proj_bias_ = Tensor::load_from_file(ss_in_bias.str());
-        }
-        if (g_model_loader->has_tensor(ss_out_bias.str())) {
-            out_proj_bias_ = Tensor::load_from_file(ss_out_bias.str());
-        }
-    }
+    conv_weight_ = Tensor::load_from_file(ss_conv_w.str(), nullptr);  // Uses global g_model_loader
+    conv_bias_ = Tensor::load_from_file(ss_conv_b.str(), nullptr);
+    in_proj_weight_ = Tensor::load_from_file(ss_in_w.str(), nullptr);
+    in_proj_bias_ = Tensor::load_from_file(ss_in_b.str(), nullptr);
+    out_proj_weight_ = Tensor::load_from_file(ss_out_w.str(), nullptr);
+    out_proj_bias_ = Tensor::load_from_file(ss_out_b.str(), nullptr);
 }
 
 void ShortConv::forward(const Tensor& x, Tensor& y) {
-    // x: (batch, seq_len, hidden_size)
-    size_t batch = x.size(0);
-    size_t seq_len = x.size(1);
-    size_t hidden_size = x.size(2);
+    int batch = x.size(0);
+    int seq_len = x.size(1);
+    int hidden_size = x.size(2);
+    int kernel_size = conv_weight_.size(1);
     
-    // Allocate output if needed
-    if (y.size() == 0) {
-        y = Tensor({batch, seq_len, hidden_size});
-    }
-    
-    // Call Conv wrapper
-    conv(x.data(), conv_weight_.data(), in_proj_weight_.data(), out_proj_weight_.data(),
-         y.data(), batch, seq_len, hidden_size, CONV_KERNEL_SIZE);
+    tensor_ops::conv(x, conv_weight_, in_proj_weight_, out_proj_weight_,
+                    &conv_bias_, &in_proj_bias_, &out_proj_bias_,
+                    y,
+                    batch, seq_len, hidden_size, kernel_size);
 }
 
-// DecoderLayer implementation
-DecoderLayer::DecoderLayer(int layer_idx, bool is_attention_layer)
+// ============================================================================
+// DecoderLayer
+// ============================================================================
+
+DecoderLayer::DecoderLayer(int layer_idx, bool is_attention_layer) 
     : layer_idx_(layer_idx), is_attention_layer_(is_attention_layer) {
     
-    // Load normalization layers
     std::stringstream ss_norm1, ss_norm2;
     ss_norm1 << "layers." << layer_idx << ".operator_norm.weight";
     ss_norm2 << "layers." << layer_idx << ".ffn_norm.weight";
@@ -275,156 +230,111 @@ DecoderLayer::DecoderLayer(int layer_idx, bool is_attention_layer)
     input_layernorm_ = std::make_unique<RMSNorm>(ss_norm1.str());
     post_attention_layernorm_ = std::make_unique<RMSNorm>(ss_norm2.str());
     
-    // Load attention or conv
     if (is_attention_layer) {
         self_attn_ = std::make_unique<Attention>(layer_idx);
     } else {
         short_conv_ = std::make_unique<ShortConv>(layer_idx);
     }
     
-    // Load MoE block (only for layers >= num_dense_layers, first layers are dense)
-    if (static_cast<size_t>(layer_idx) >= NUM_DENSE_LAYERS) {
+    if (layer_idx >= 2) {
         moe_block_ = std::make_unique<SparseMoeBlock>(layer_idx);
     } else {
-        // Dense layer - load simple MLP
         std::stringstream ss_w1, ss_w2, ss_w3;
-        ss_w1 << "layers." << layer_idx << ".feed_forward.w1.weight";
-        ss_w2 << "layers." << layer_idx << ".feed_forward.w2.weight";
-        ss_w3 << "layers." << layer_idx << ".feed_forward.w3.weight";
+        ss_w1 << "layers." << layer_idx << ".feed_forward.gate_proj.weight";
+        ss_w2 << "layers." << layer_idx << ".feed_forward.down_proj.weight";
+        ss_w3 << "layers." << layer_idx << ".feed_forward.up_proj.weight";
+        
         dense_mlp_ = std::make_unique<MLP>(ss_w1.str(), ss_w2.str(), ss_w3.str());
     }
 }
 
 void DecoderLayer::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
-                          const Tensor* attention_mask, Tensor& output) {
-    // Input norm
-    Tensor normed_input(x.shape());
+                           const Tensor* attention_mask, Tensor& output) {
+    Tensor normed_input({x.size(0), x.size(1), x.size(2)});
     input_layernorm_->forward(x, normed_input);
     
-    // Attention or Conv
-    Tensor attn_output(x.shape());
+    Tensor attn_output({x.size(0), x.size(1), x.size(2)});
     if (is_attention_layer_) {
         self_attn_->forward(normed_input, cos, sin, attention_mask, attn_output);
     } else {
         short_conv_->forward(normed_input, attn_output);
     }
     
-    // Residual connection
-    Tensor hidden_states(x.shape());
+    Tensor hidden_states({x.size(0), x.size(1), x.size(2)});
     tensor_ops::add(x, attn_output, hidden_states);
     
-    // Post attention norm
-    Tensor normed_hidden(x.shape());
+    Tensor normed_hidden({x.size(0), x.size(1), x.size(2)});
     post_attention_layernorm_->forward(hidden_states, normed_hidden);
     
-    // MoE block or dense MLP
-    Tensor ffn_output;
+    Tensor ffn_output({x.size(0), x.size(1), x.size(2)});
     if (moe_block_) {
-        // MoE layer (layers >= 2)
         Tensor router_logits;
         moe_block_->forward(normed_hidden, ffn_output, router_logits);
     } else {
-        // Dense layer (layers 0-1)
         dense_mlp_->forward(normed_hidden, ffn_output);
     }
     
-    // Residual connection
     tensor_ops::add(hidden_states, ffn_output, output);
 }
 
 // ============================================================================
-// Model Implementation - Complete model
+// LFM2Model
 // ============================================================================
 
 LFM2Model::LFM2Model(const std::string& model_file) {
-    std::cout << "Loading LFM2-8B-A1B model from " << model_file << std::endl;
-    
-    // Initialize global model loader
-    g_model_loader = std::make_unique<ModelLoader>(model_file);
+    loader_ = std::make_unique<ModelLoader>(model_file);
+    g_model_loader = loader_.get();
     
     load_embeddings();
     load_layers();
     load_output_layers();
-    
-    // Initialize RoPE
-    rotary_emb_ = std::make_unique<RotaryEmbedding>();
-    
-    std::cout << "Model loaded successfully!" << std::endl;
 }
 
 void LFM2Model::load_embeddings() {
-    std::cout << "Loading embeddings..." << std::endl;
-    embed_tokens_ = Tensor::load_from_file("embed_tokens.weight");
-    std::cout << "  Embeddings shape: " << embed_tokens_.size(0) << " x " << embed_tokens_.size(1) << std::endl;
+    embed_tokens_ = Tensor::load_from_file("embed_tokens.weight", loader_.get());  // Uses instance loader
 }
 
 void LFM2Model::load_layers() {
-    std::cout << "Loading " << NUM_HIDDEN_LAYERS << " decoder layers..." << std::endl;
-    
-    // Read layer types from config.h LAYER_TYPES array
-    // 0 = full_attention, 1 = conv
-    layers_.reserve(NUM_HIDDEN_LAYERS);
-    for (size_t i = 0; i < NUM_HIDDEN_LAYERS; i++) {
-        bool is_attention = (LAYER_TYPES[i] == 0);
-        std::cout << "  Layer " << i << ": " << (is_attention ? "Attention" : "Conv") << std::endl;
-        layers_.push_back(std::make_unique<DecoderLayer>(i, is_attention));
+    for (int i = 0; i < NUM_HIDDEN_LAYERS; i++) {
+        bool is_attn = (LAYER_TYPES[i] == 0);
+        layers_.push_back(std::make_unique<DecoderLayer>(i, is_attn));
     }
 }
 
 void LFM2Model::load_output_layers() {
-    std::cout << "Loading output layers..." << std::endl;
-    
-    norm_ = std::make_unique<RMSNorm>("embedding_norm.weight");
-    
-    // LM head might share weights with embeddings
-    if (g_model_loader->has_tensor("lm_head.weight")) {
-        lm_head_ = Tensor::load_from_file("lm_head.weight");
-    } else {
-        // Use tied weights (same as embeddings)
-        lm_head_ = embed_tokens_;
-        std::cout << "  Using tied weights for LM head" << std::endl;
-    }
+    norm_ = std::make_unique<RMSNorm>("norm.weight");
+    lm_head_ = Tensor::load_from_file("lm_head.weight", loader_.get());  // Uses instance loader
+    rotary_emb_ = std::make_unique<RotaryEmbedding>();
 }
 
 void LFM2Model::forward(const std::vector<int>& input_ids, Tensor& logits) {
-    size_t batch = 1;
-    size_t seq_len = input_ids.size();
+    int batch = 1;
+    int seq_len = input_ids.size();
     
-    // Embedding lookup
-    Tensor hidden_states({batch, seq_len, HIDDEN_SIZE});
-    for (size_t i = 0; i < seq_len; i++) {
-        int token_id = input_ids[i];
-        for (size_t j = 0; j < HIDDEN_SIZE; j++) {
-            hidden_states.at(0, i, j) = embed_tokens_.at(token_id, j);
-        }
-    }
+    int* input_ids_gpu;
+    CHECK_CUDA(cudaMalloc(&input_ids_gpu, seq_len * sizeof(int)));
+    CHECK_CUDA(cudaMemcpy(input_ids_gpu, input_ids.data(), seq_len * sizeof(int), cudaMemcpyHostToDevice));
     
-    // Compute RoPE embeddings
-    Tensor cos({seq_len, HEAD_DIM});
-    Tensor sin({seq_len, HEAD_DIM});
+    Tensor hidden_states({(size_t)batch, (size_t)seq_len, HIDDEN_SIZE});
+    tensor_ops::embedding_lookup(input_ids_gpu, embed_tokens_, hidden_states, batch, seq_len, HIDDEN_SIZE);
+    
+    CHECK_CUDA(cudaFree(input_ids_gpu));
+    
+    Tensor cos({(size_t)seq_len, HEAD_DIM});
+    Tensor sin({(size_t)seq_len, HEAD_DIM});
     rotary_emb_->forward(seq_len, cos, sin);
     
-    // Create causal attention mask (not strictly needed for CPU impl)
-    Tensor* attention_mask = nullptr;
-    
-    // Pass through decoder layers
-    for (size_t i = 0; i < NUM_HIDDEN_LAYERS; i++) {
-        Tensor output({batch, seq_len, HIDDEN_SIZE});
-        layers_[i]->forward(hidden_states, cos, sin, attention_mask, output);
-        hidden_states = output;
+    for (auto& layer : layers_) {
+        Tensor layer_out({(size_t)batch, (size_t)seq_len, HIDDEN_SIZE});
+        layer->forward(hidden_states, cos, sin, nullptr, layer_out);
+        hidden_states = std::move(layer_out);
     }
     
-    // Final norm
-    Tensor normed_output({batch, seq_len, HIDDEN_SIZE});
-    norm_->forward(hidden_states, normed_output);
+    Tensor norm_out({(size_t)batch, (size_t)seq_len, HIDDEN_SIZE});
+    norm_->forward(hidden_states, norm_out);
     
-    // LM head projection (only for last token in generation)
-    Tensor last_hidden({batch, 1, HIDDEN_SIZE});
-    for (size_t i = 0; i < HIDDEN_SIZE; i++) {
-        last_hidden.at(0, 0, i) = normed_output.at(0, seq_len - 1, i);
-    }
+    Tensor output({(size_t)batch * seq_len, VOCAB_SIZE});
+    tensor_ops::matmul_transposed(norm_out, lm_head_, output);
     
-    Tensor last_hidden_flat = last_hidden.view({batch, HIDDEN_SIZE});
-    logits = Tensor({batch, VOCAB_SIZE});
-    tensor_ops::matmul_transposed(last_hidden_flat, lm_head_, logits);
+    logits = std::move(output);
 }

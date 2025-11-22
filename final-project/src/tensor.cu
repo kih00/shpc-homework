@@ -5,7 +5,6 @@
 #include <iostream>
 #include <algorithm>
 #include <numeric>
-#include <cuda_runtime.h>
 #include "model_loader.h"
 
 // Global model loader is declared in model.h
@@ -28,6 +27,7 @@ Tensor::Tensor(const std::vector<size_t>& shape, float* data, bool copy)
     size_ = compute_size();
     if (copy) {
         allocate();
+        // Assume data is host pointer when using this constructor with copy=true
         CHECK_CUDA(cudaMemcpy(data_, data, size_ * sizeof(float), cudaMemcpyHostToDevice));
     } else {
         data_ = data;
@@ -44,8 +44,6 @@ Tensor::Tensor(const Tensor& other)
     if (other.size_ > 0) {
         allocate();
         CHECK_CUDA(cudaMemcpy(data_, other.data_, size_ * sizeof(float), cudaMemcpyDeviceToDevice));
-    } else {
-        data_ = nullptr;
     }
 }
 
@@ -59,8 +57,6 @@ Tensor& Tensor::operator=(const Tensor& other) {
         if (other.size_ > 0) {
             allocate();
             CHECK_CUDA(cudaMemcpy(data_, other.data_, size_ * sizeof(float), cudaMemcpyDeviceToDevice));
-        } else {
-            data_ = nullptr;
         }
     }
     return *this;
@@ -94,8 +90,6 @@ Tensor& Tensor::operator=(Tensor&& other) noexcept {
 void Tensor::allocate() {
     if (size_ > 0) {
         CHECK_CUDA(cudaMalloc(&data_, size_ * sizeof(float)));
-    } else {
-        data_ = nullptr;
     }
 }
 
@@ -128,6 +122,8 @@ size_t Tensor::compute_stride(int dim) const {
 }
 
 // Element access
+// WARNING: These will crash if called on host since data_ is device pointer.
+// We keep them for compilation but they shouldn't be used in host code.
 float& Tensor::at(size_t i) {
     return data_[i];
 }
@@ -182,6 +178,7 @@ Tensor Tensor::view(const std::vector<size_t>& new_shape) const {
 }
 
 // IO operations
+// Static method to load tensor from file
 Tensor Tensor::load_from_file(const std::string& filename, ModelLoader* loader) {
     // If a specific loader is provided, use it
     if (loader) {
@@ -193,7 +190,7 @@ Tensor Tensor::load_from_file(const std::string& filename, ModelLoader* loader) 
         return g_model_loader->load_tensor(filename);
     }
     
-    // Fallback to individual file loading (if model.bin not used)
+    // Fallback to individual file loading
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open file: " + filename);
@@ -211,14 +208,15 @@ Tensor Tensor::load_from_file(const std::string& filename, ModelLoader* loader) 
         shape[i] = dim;
     }
     
-    // Create tensor
+    // Create tensor (allocates on GPU)
     Tensor tensor(shape);
     
-    // Read data
-    // Copy to host buffer first then to device
-    std::vector<float> host_data(tensor.size());
-    file.read(reinterpret_cast<char*>(host_data.data()), tensor.size() * sizeof(float));
-    CHECK_CUDA(cudaMemcpy(tensor.data(), host_data.data(), tensor.size() * sizeof(float), cudaMemcpyHostToDevice));
+    // Read data to temp host buffer
+    std::vector<float> temp_data(tensor.size());
+    file.read(reinterpret_cast<char*>(temp_data.data()), tensor.size() * sizeof(float));
+    
+    // Copy to GPU
+    CHECK_CUDA(cudaMemcpy(tensor.data(), temp_data.data(), tensor.size() * sizeof(float), cudaMemcpyHostToDevice));
     
     file.close();
     return tensor;
@@ -240,27 +238,34 @@ void Tensor::save_to_file(const std::string& filename) const {
         file.write(reinterpret_cast<const char*>(&dim32), sizeof(uint32_t));
     }
     
+    // Copy data to temp host buffer
+    std::vector<float> temp_data(size_);
+    CHECK_CUDA(cudaMemcpy(temp_data.data(), data_, size_ * sizeof(float), cudaMemcpyDeviceToHost));
+    
     // Write data
-    // Copy from device to host first
-    std::vector<float> host_data(size_);
-    CHECK_CUDA(cudaMemcpy(host_data.data(), data_, size_ * sizeof(float), cudaMemcpyDeviceToHost));
-    file.write(reinterpret_cast<const char*>(host_data.data()), size_ * sizeof(float));
+    file.write(reinterpret_cast<const char*>(temp_data.data()), size_ * sizeof(float));
     
     file.close();
 }
 
 // Tensor operations
 Tensor Tensor::copy() const {
-    return Tensor(shape_, data_, true);
+    Tensor result(shape_);
+    CHECK_CUDA(cudaMemcpy(result.data(), data_, size_ * sizeof(float), cudaMemcpyDeviceToDevice));
+    return result;
+}
+
+// Helper kernel for fill
+__global__ void fill_kernel(float* data, float value, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        data[idx] = value;
+    }
 }
 
 void Tensor::fill(float value) {
-    if (value == 0.0f) {
-        zero();
-    } else {
-        // Fallback: copy from host
-        std::vector<float> host_data(size_, value);
-        CHECK_CUDA(cudaMemcpy(data_, host_data.data(), size_ * sizeof(float), cudaMemcpyHostToDevice));
+    if (data_ != nullptr && size_ > 0) {
+        fill_kernel<<<(size_ + 255) / 256, 256>>>(data_, value, size_);
     }
 }
 
@@ -273,18 +278,3 @@ void Tensor::zero() {
 void Tensor::ones() {
     fill(1.0f);
 }
-
-void Tensor::copy_from_host(const void* src, size_t size) {
-    if (size > size_ * sizeof(float)) {
-        throw std::out_of_range("Source size exceeds tensor size");
-    }
-    CHECK_CUDA(cudaMemcpy(data_, src, size, cudaMemcpyHostToDevice));
-}
-
-void Tensor::copy_to_host(void* dst, size_t size) const {
-    if (size > size_ * sizeof(float)) {
-        throw std::out_of_range("Destination size exceeds tensor size");
-    }
-    CHECK_CUDA(cudaMemcpy(dst, data_, size, cudaMemcpyDeviceToHost));
-}
-
