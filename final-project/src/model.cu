@@ -7,18 +7,8 @@
 #include <sstream>
 #include <cuda_runtime.h>
 
-#define CHECK_CUDA(call)                                              \
-  do {                                                                \
-    cudaError_t status_ = call;                                       \
-    if (status_ != cudaSuccess) {                                     \
-      fprintf(stderr, "CUDA error (%s:%d): %s\n", __FILE__, __LINE__, \
-              cudaGetErrorString(status_));                           \
-      exit(EXIT_FAILURE);                                             \
-    }                                                                 \
-  } while (0)
-
 // Global model loader (definition)
-std::unique_ptr<ModelLoader> g_model_loader;
+ModelLoader* g_model_loader;
 
 // ============================================================================
 // MLP

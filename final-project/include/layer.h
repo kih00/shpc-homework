@@ -35,9 +35,9 @@ public:
     MLP(const std::string& w1_file, const std::string& w2_file, const std::string& w3_file);
     void forward(const Tensor& x, Tensor& y);
     
-    const Tensor& w1() const { return w1_; }
-    const Tensor& w2() const { return w2_; }
-    const Tensor& w3() const { return w3_; }
+    Tensor& w1() { return w1_; }
+    Tensor& w2() { return w2_; }
+    Tensor& w3() { return w3_; }
     
 private:
     Tensor w1_;  // up projection
