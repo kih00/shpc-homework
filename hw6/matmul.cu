@@ -16,72 +16,127 @@
     }                                                                          \
   }
 
-#define TILE_WIDTH 32
+#define TILE 16
+#define CHUNK 8
+#define NUM_STAGE 2
 #define MAX_NUM_GPU 4
 int num_devices = 0;
 
 __global__ void matmul_kernel(float *A, float *B, float *C, int M, int N,
                               int K) {
-  // shared memory for double buffering
-  __shared__ float A_tile[2][TILE_WIDTH][TILE_WIDTH];
-  __shared__ float B_tile[2][TILE_WIDTH][TILE_WIDTH];
+  __shared__ float A_tile[NUM_STAGE][TILE*CHUNK][CHUNK];
+  __shared__ float B_tile[NUM_STAGE][CHUNK][TILE*CHUNK];
 
-  // calculate global row and column index
   int tx = threadIdx.x;
   int ty = threadIdx.y;
-  int row = blockIdx.y * TILE_WIDTH + ty;
-  int col = blockIdx.x * TILE_WIDTH + tx;
+  int block_row = blockIdx.y * TILE * CHUNK;
+  int block_col = blockIdx.x * TILE * CHUNK;
 
-  // register to hold the computed value
-  float C_val = 0.0f;
+  int row = blockIdx.y * TILE * CHUNK + ty * CHUNK;
+  int col = blockIdx.x * TILE * CHUNK + tx * CHUNK;
 
-  // number of tile loops
-  int num_tiles = (K + TILE_WIDTH - 1) / TILE_WIDTH;
+  float C_val[CHUNK][CHUNK];
+#pragma unroll
+  for (int i = 0; i < CHUNK; ++i) {
+#pragma unroll
+    for (int j = 0; j < CHUNK; ++j) {
+      C_val[i][j] = 0.0f;
+    }
+  }
 
-  // pre-load first tile
-  if (row < M && tx < K)
-    A_tile[0][ty][tx] = A[row * K + tx];
-  else
-    A_tile[0][ty][tx] = 0.0f;
-  
-  if (ty < K && col < N)
-    B_tile[0][ty][tx] = B[ty * N + col];
-  else
-    B_tile[0][ty][tx] = 0.0f;
+  int num_chunks = (K + CHUNK - 1) / CHUNK;
+  if (num_chunks == 0) return;
+
+  int tid = ty * blockDim.x + tx;
+  int total_threads = blockDim.x * blockDim.y;
+
+  int curr = 0;
+  int next = 1;
+  for (int i=tid; i<TILE*CHUNK*CHUNK; i+=total_threads) {
+    int local_row_A = i / CHUNK;
+    int local_col_A = i % CHUNK;
+    int local_row_B = i / (TILE * CHUNK);
+    int local_col_B = i % (TILE * CHUNK);
+
+    int global_row_A = block_row + local_row_A;
+    int global_col_A = local_col_A;
+    int global_row_B = local_row_B;
+    int global_col_B = block_col + local_col_B;
+
+    float val_A = 0.0f, val_B = 0.0f;
+    if (global_row_A < M && global_col_A < K)
+      val_A = A[global_row_A * K + global_col_A];
+
+    if (global_row_B < K && global_col_B < N)
+      val_B = B[global_row_B * N + global_col_B];
+
+    A_tile[curr][local_row_A][local_col_A] = val_A;
+    B_tile[curr][local_row_B][local_col_B] = val_B;
+  }
 
   __syncthreads();
 
-  // simultaneously load and compute tiles
-  for (int t = 0; t < num_tiles; ++t) {
-    int curr = t % 2;       // for multiplication
-    int next = (t + 1) % 2; // for loading
-
+  // double buffering
+  for (int t = 0; t < num_chunks; ++t) {
     // load next tile
-    if (t + 1 < num_tiles) {
-      int A_col = (t + 1) * TILE_WIDTH + tx;
-      if (row < M && A_col < K)
-        A_tile[next][ty][tx] = A[row * K + A_col];
-      else
-        A_tile[next][ty][tx] = 0.0f;
-      
-      int B_row = (t + 1) * TILE_WIDTH + ty;
-      if (B_row < K && col < N)
-        B_tile[next][ty][tx] = B[B_row * N + col];
-      else
-        B_tile[next][ty][tx] = 0.0f;
+    if (t + 1 < num_chunks) {
+      int next_k = (t + 1) * CHUNK;
+
+      for (int i=tid; i<TILE*CHUNK*CHUNK; i+=total_threads) {
+        int local_row_A = i / CHUNK;
+        int local_col_A = i % CHUNK;
+        int local_row_B = i / (TILE * CHUNK);
+        int local_col_B = i % (TILE * CHUNK);
+
+        int global_row_A = block_row + local_row_A;
+        int global_col_A = next_k + local_col_A;
+        int global_row_B = next_k + local_row_B;
+        int global_col_B = block_col + local_col_B;
+
+        float val_A = 0.0f, val_B = 0.0f;
+        if (global_row_A < M && global_col_A < K)
+          val_A = A[global_row_A * K + global_col_A];
+
+        if (global_row_B < K && global_col_B < N)
+          val_B = B[global_row_B * N + global_col_B];
+
+        A_tile[next][local_row_A][local_col_A] = val_A;
+        B_tile[next][local_row_B][local_col_B] = val_B;
+      }
     }
 
-    // compute current tile
-    for (int k = 0; k < TILE_WIDTH; ++k) {
-      C_val += A_tile[curr][ty][k] * B_tile[curr][k][tx];
-    } 
+    float A_reg[CHUNK];
+#pragma unroll
+    for (int k = 0; k < CHUNK; ++k) {
+#pragma unroll
+      for (int i = 0; i < CHUNK; ++i) {
+        A_reg[i] = A_tile[curr][ty * CHUNK + i][k];
+      }
+#pragma unroll
+      for (int j = 0; j < CHUNK; ++j) {
+        float B_val = B_tile[curr][k][tx * CHUNK + j];
+#pragma unroll
+        for (int i = 0; i < CHUNK; ++i) {
+          C_val[i][j] += A_reg[i] * B_val;
+        }
+      }
+    }
 
-    // synchronize to make sure the loading is done
     __syncthreads();
+    curr ^= 1;
+    next ^= 1;
   }
 
-  // write back the result
-  if (row < M && col < N) C[row * N + col] = C_val;
+  for (int i = 0; i < CHUNK; ++i) {
+    int global_row = row + i;
+    if (global_row >= M) continue;
+    for (int j = 0; j < CHUNK; ++j) {
+      int global_col = col + j;
+      if (global_col < N) {
+        C[global_row * N + global_col] = C_val[i][j];
+      }
+    }
+  }
 }
 
 // Array of device (GPU) pointers
@@ -113,9 +168,9 @@ void matmul(const float *A, const float *B, float *C, int M, int N, int K) {
     }
 
     // Launch kernel on every GPU
-    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
-    dim3 gridDim((N + TILE_WIDTH - 1) / TILE_WIDTH,
-                 (M_local + TILE_WIDTH - 1) / TILE_WIDTH,
+    dim3 blockDim(TILE, TILE, 1);
+    dim3 gridDim((N + (TILE * CHUNK) - 1) / (TILE * CHUNK),
+                 (M_local + TILE * CHUNK - 1) / (TILE * CHUNK),
                  1);
 
     matmul_kernel<<<gridDim, blockDim, 0, streams[i]>>>(a_d[i], b_d[i], c_d[i], M_local, N, K);
