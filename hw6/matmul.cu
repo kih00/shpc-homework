@@ -17,15 +17,14 @@
   }
 
 #define TILE 16
-#define CHUNK 8
-#define NUM_STAGE 2
+#define CHUNK 6
 #define MAX_NUM_GPU 4
 int num_devices = 0;
 
 __global__ void matmul_kernel(float *A, float *B, float *C, int M, int N,
                               int K) {
-  __shared__ float A_tile[NUM_STAGE][TILE*CHUNK][CHUNK];
-  __shared__ float B_tile[NUM_STAGE][CHUNK][TILE*CHUNK];
+  __shared__ float A_tile[2][TILE*CHUNK][CHUNK];
+  __shared__ float B_tile[2][CHUNK][TILE*CHUNK];
 
   int tx = threadIdx.x;
   int ty = threadIdx.y;
@@ -35,14 +34,7 @@ __global__ void matmul_kernel(float *A, float *B, float *C, int M, int N,
   int row = blockIdx.y * TILE * CHUNK + ty * CHUNK;
   int col = blockIdx.x * TILE * CHUNK + tx * CHUNK;
 
-  float C_val[CHUNK][CHUNK];
-#pragma unroll
-  for (int i = 0; i < CHUNK; ++i) {
-#pragma unroll
-    for (int j = 0; j < CHUNK; ++j) {
-      C_val[i][j] = 0.0f;
-    }
-  }
+  float C_val[CHUNK][CHUNK] = {0.0f};
 
   int num_chunks = (K + CHUNK - 1) / CHUNK;
   if (num_chunks == 0) return;
@@ -106,16 +98,14 @@ __global__ void matmul_kernel(float *A, float *B, float *C, int M, int N,
     }
 
     float A_reg[CHUNK];
-#pragma unroll
+    #pragma unroll
     for (int k = 0; k < CHUNK; ++k) {
-#pragma unroll
       for (int i = 0; i < CHUNK; ++i) {
         A_reg[i] = A_tile[curr][ty * CHUNK + i][k];
       }
-#pragma unroll
       for (int j = 0; j < CHUNK; ++j) {
         float B_val = B_tile[curr][k][tx * CHUNK + j];
-#pragma unroll
+        #pragma unroll
         for (int i = 0; i < CHUNK; ++i) {
           C_val[i][j] += A_reg[i] * B_val;
         }

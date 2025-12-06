@@ -34,7 +34,7 @@ void alloc_mat(float **m, int R, int S) {
 void rand_mat(float *m, int R, int S) {
   int N = R * S;
   for (int j = 0; j < N; j++) {
-    m[j] = (float)rand() / RAND_MAX - 0.5;
+    m[j] = (float)rand() / RAND_MAX;
   }
 }
 

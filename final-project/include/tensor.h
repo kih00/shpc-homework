@@ -4,7 +4,6 @@
 #include <vector>
 #include <string>
 #include <memory>
-#include <cuda_runtime.h>
 
 /* Macro for checking CUDA errors */
 #define CHECK_CUDA(call)                                                 \
@@ -64,7 +63,7 @@ public:
     void reshape(const std::vector<size_t>& new_shape);
     Tensor view(const std::vector<size_t>& new_shape) const;
     
-    // IO operations  
+    // IO operations
     static Tensor load_from_file(const std::string& filename, ModelLoader* loader = nullptr);
     void save_to_file(const std::string& filename) const;
     
@@ -121,32 +120,4 @@ namespace tensor_ops {
     // Convolution
     void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias,
                        Tensor& y);
-                       
-    // High-level operations (Basic Blocks)
-    void attention(const Tensor& x, const Tensor& cos, const Tensor& sin,
-                   const Tensor& q_proj, const Tensor& k_proj, const Tensor& v_proj, const Tensor& o_proj,
-                   const Tensor& q_norm, const Tensor& k_norm,
-                   Tensor& output,
-                   int batch, int seq_len, int num_heads, int head_dim, int num_kv_heads);
-                   
-    void conv(const Tensor& x, const Tensor& conv_weight, const Tensor& in_proj_weight, const Tensor& out_proj_weight,
-              const Tensor* conv_bias, const Tensor* in_proj_bias, const Tensor* out_proj_bias,
-              Tensor& output,
-              int batch, int seq_len, int hidden_size, int kernel_size);
-              
-    // Embedding lookup
-    void embedding_lookup(const int* input_ids, const Tensor& embedding_table, Tensor& output,
-                          int batch, int seq_len, int hidden_size);
-
-    // MoE operations
-    void route_tokens(const Tensor& router_logits, const Tensor& expert_bias,
-                      Tensor& top_k_indices, Tensor& top_k_weights,
-                      int num_tokens, int num_experts, int num_experts_per_tok);
-
-    void moe_expert_dispatch(const Tensor& x_flat, const Tensor& top_k_indices, const Tensor& top_k_weights,
-                             float** w1_ptrs_gpu, float** w2_ptrs_gpu, float** w3_ptrs_gpu,
-                             Tensor& output,
-                             int num_tokens, int hidden_size, int intermediate_size, 
-                             int num_experts_per_tok, int seq_len);
-
-} // namespace tensor_ops
+}

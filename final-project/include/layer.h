@@ -11,8 +11,6 @@ public:
     RMSNorm(const std::string& weight_file);
     void forward(const Tensor& x, Tensor& y);
     
-    const Tensor& weight() const { return weight_; }
-    
 private:
     Tensor weight_;
 };
@@ -35,10 +33,6 @@ public:
     MLP(const std::string& w1_file, const std::string& w2_file, const std::string& w3_file);
     void forward(const Tensor& x, Tensor& y);
     
-    Tensor& w1() { return w1_; }
-    Tensor& w2() { return w2_; }
-    Tensor& w3() { return w3_; }
-    
 private:
     Tensor w1_;  // up projection
     Tensor w3_;  // gate projection
@@ -49,21 +43,12 @@ private:
 class SparseMoeBlock {
 public:
     SparseMoeBlock(int layer_idx);
-    ~SparseMoeBlock();
     void forward(const Tensor& x, Tensor& y, Tensor& router_logits);
     
 private:
     Tensor gate_;  // router
     std::vector<MLP> experts_;
     Tensor expert_bias_;  // optional
-    
-    // Device pointers for MoE kernel
-    float** w1_ptrs_ = nullptr;
-    float** w2_ptrs_ = nullptr;
-    float** w3_ptrs_ = nullptr;
-    float** w1_ptrs_gpu_ = nullptr;
-    float** w2_ptrs_gpu_ = nullptr;
-    float** w3_ptrs_gpu_ = nullptr;
     
     void route_tokens(const Tensor& router_logits, std::vector<int>& top_k_indices,
                      std::vector<float>& top_k_weights);
