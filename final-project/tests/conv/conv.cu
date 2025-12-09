@@ -7,8 +7,8 @@
 #include <string.h>
 
 // Tunable launch params
-constexpr int BLOCK_MM = 32;     // tile size for matmul
-constexpr int BLOCK_SEQ = 256;   // threads along sequence dimension
+constexpr int BLOCK_MM = 16;
+constexpr int BLOCK_SEQ = 128;
 
 #define CHECK_CUDA(call)                                              \
   do {                                                                \
@@ -29,56 +29,29 @@ static cudaStream_t stream;
 // ============================================================================
 
 // Matrix multiply: out[m, n] = a[m, k] @ w[n, k]^T
-__global__ void matmul_transposed_kernel(const float* __restrict__ a,
-           const float* __restrict__ w, float* __restrict__ out,
-           int m, int k, int n) {
-  __shared__ float a_tile[BLOCK_MM][BLOCK_MM];
-  __shared__ float w_tile[BLOCK_MM][BLOCK_MM];
-
-  int row = blockIdx.y * BLOCK_MM + threadIdx.y;
-  int col = blockIdx.x * BLOCK_MM + threadIdx.x;
-
-  float sum = 0.0f;
-  int tiles = (k + BLOCK_MM - 1) / BLOCK_MM;
-  for (int t = 0; t < tiles; ++t) {
-    int a_col = t * BLOCK_MM + threadIdx.x;
-    int w_k = t * BLOCK_MM + threadIdx.y;
-
-    a_tile[threadIdx.y][threadIdx.x] = (row < m && a_col < k)
-                        ? a[row * k + a_col]
-                        : 0.0f;
-    w_tile[threadIdx.y][threadIdx.x] = (col < n && w_k < k)
-                        ? w[col * k + w_k]
-                        : 0.0f;
-    __syncthreads();
-
-    #pragma unroll
-    for (int i = 0; i < BLOCK_MM; ++i) {
-      sum += a_tile[threadIdx.y][i] * w_tile[i][threadIdx.x];
-    }
-    __syncthreads();
-  }
-
-  if (row < m && col < n) out[row * n + col] = sum;
+__global__ void matmul_transposed_kernel(const float* a, const float* w,
+                     float* out, int m, int k, int n) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= m || col >= n) return;
+    const float* a_row = a + row * k;
+    const float* w_row = w + col * k;
+    float sum = 0.0f;
+    for (int i = 0; i < k; i++) sum += a_row[i] * w_row[i];
+    out[row * n + col] = sum;
 }
 
 // Compute y_pre = C * conv(B * gate), following ShortConv logic
 // in_proj_out layout: (bs, 3*H) where bs = batch*seq_len
 // conv_weight layout: (H, K)
 // y_pre_out layout: (batch, H, seq_len)
-__global__ void shortconv_kernel(const float* __restrict__ in_proj_out,
-         const float* __restrict__ conv_w, float* __restrict__ y_pre_out,
-         int batch, int seq_len, int hidden, int kernel) {
+__global__ void shortconv_kernel(const float* in_proj_out, const float* conv_w,
+                 float* y_pre_out, int batch, int seq_len,
+                 int hidden, int kernel) {
     int b = blockIdx.z;
     int h = blockIdx.y;
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= seq_len) return;
-
-  extern __shared__ float shared_w[];
-  for (int k_idx = threadIdx.x; k_idx < kernel; k_idx += blockDim.x) {
-    shared_w[k_idx] = conv_w[h * kernel + k_idx];
-  }
-  __syncthreads();
 
     int base = (b * seq_len + s) * (3 * hidden) + h;
 
@@ -89,13 +62,13 @@ __global__ void shortconv_kernel(const float* __restrict__ in_proj_out,
 
     float conv_sum = 0.0f;
     for (int k = 0; k < kernel; k++) {
-      int in_pos = s - (kernel - 1) + k;
-      if (in_pos >= 0) {
-        int base_in = (b * seq_len + in_pos) * (3 * hidden) + h;
+        int in_pos = s - (kernel - 1) + k;
+        if (in_pos >= 0) {
+        int base_in = (b * seq_len + in_pos) * (3 * hidden) + h; // reuse layout for B*gate
         float B_in = in_proj_out[base_in];
         float gate_in = in_proj_out[base_in + 2 * hidden];
-        conv_sum += B_in * gate_in * shared_w[k];
-      }
+        conv_sum += B_in * gate_in * conv_w[h * kernel + k];
+        }
     }
     float y = C * conv_sum;
     y_pre_out[(b * hidden + h) * seq_len + s] = y; // (B,H,S) packed
