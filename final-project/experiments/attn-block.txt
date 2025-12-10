@@ -1,0 +1,25 @@
+Options:
+  Batch size: 32, Seq len: 16
+  Hidden size: 2048, Num heads: 32, Head dim: 64
+  Num KV heads: 8, Num KV groups: 4
+  Number of iterations: 10
+  Print output: off
+  Validation: on
+
+Initializing...
+Running CUDA attention...
+  Iteration 1/10
+  Iteration 2/10
+  Iteration 3/10
+  Iteration 4/10
+  Iteration 5/10
+  Iteration 6/10
+  Iteration 7/10
+  Iteration 8/10
+  Iteration 9/10
+  Iteration 10/10
+Elapsed time: 0.012108 sec
+Throughput: 42287.00 tokens/sec
+Running CPU reference...
+Validating...
+Result: VALID

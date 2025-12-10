@@ -1,0 +1,39 @@
+deadline: 12/19 23:59:59
+
+[Allowed Modifications]
+- Changing memory layout
+- Reordering loop structures
+- Adding padding data or operations,
+- Applying operator fusion
+
+[Disallowed Modifications]
+- Performing model inference outside the generate function
+- Replacing the model with a different one or using a different algorithm that produces the same output.
+    - 예: cuBLAS, cuDNN 등 외부 라이브러리 사용 불가
+- Skipping model loading based on known expert activations is not allowed, as it assumes unrealistic deployment
+conditions
+
+[Basic block]
+- 수정 가능한 파일:
+    - attn.cu
+    - conv.cu
+    - moe.cu
+- 하나의 GPU에서 돌아감
+- 채점 기준:
+    - attn: 5000 token/s 이상 만점
+    - conv: 10000 token/s 이상 만점
+    - moe: 250 token/s 이상 만점
+
+[Full model]
+- 수정 가능한 파일:
+    - tensor.h, tensor.cu
+    - layer.h, layer.cu
+    - model.h, model.cu
+    - model_loader.h, model_loader.cpp
+    - main.cpp
+    - run.sh
+- 채점 기준:
+    - 결과의 로그 스케일로 상대평가
+
+[FP16]
+- FP16 버전을 구현하여 기존 버전(FP32)의 2배를 넘으면 추가 점수 10%
