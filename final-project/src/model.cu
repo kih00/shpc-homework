@@ -608,16 +608,19 @@ void LFM2Model::load_output_layers() {
     }
 }
 
-void LFM2Model::forward(const std::vector<int>& input_ids, Tensor& logits) {
-    size_t batch = 1;
-    size_t seq_len = input_ids.size();
+void LFM2Model::forward(const std::vector<int>& input_ids, size_t batch, size_t seq_len, Tensor& logits) {
+    if (batch == 0 || seq_len == 0 || input_ids.size() != batch * seq_len) {
+        throw std::runtime_error("Invalid batch/seq_len for forward");
+    }
     
     // Embedding lookup
     Tensor hidden_states({batch, seq_len, HIDDEN_SIZE});
-    for (size_t i = 0; i < seq_len; i++) {
-        int token_id = input_ids[i];
-        for (size_t j = 0; j < HIDDEN_SIZE; j++) {
-            hidden_states.at(0, i, j) = embed_tokens_.at(token_id, j);
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t i = 0; i < seq_len; i++) {
+            int token_id = input_ids[b * seq_len + i];
+            for (size_t j = 0; j < HIDDEN_SIZE; j++) {
+                hidden_states.at(b, i, j) = embed_tokens_.at(token_id, j);
+            }
         }
     }
     
@@ -642,8 +645,10 @@ void LFM2Model::forward(const std::vector<int>& input_ids, Tensor& logits) {
     
     // LM head projection (only for last token in generation)
     Tensor last_hidden({batch, 1, HIDDEN_SIZE});
-    for (size_t i = 0; i < HIDDEN_SIZE; i++) {
-        last_hidden.at(0, 0, i) = normed_output.at(0, seq_len - 1, i);
+    for (size_t b = 0; b < batch; b++) {
+        for (size_t i = 0; i < HIDDEN_SIZE; i++) {
+            last_hidden.at(b, 0, i) = normed_output.at(b, seq_len - 1, i);
+        }
     }
     
     Tensor last_hidden_flat = last_hidden.view({batch, HIDDEN_SIZE});

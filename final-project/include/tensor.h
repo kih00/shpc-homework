@@ -4,6 +4,9 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <cstdio>
+#include <cstdlib>
+#include <cuda_runtime.h>
 
 /* Macro for checking CUDA errors */
 #define CHECK_CUDA(call)                                                 \
@@ -43,10 +46,10 @@ public:
     size_t size(int dim) const;
     
     // Data access
-    float* data() { return data_; }
-    const float* data() const { return data_; }
-    float& operator[](size_t idx) { return data_[idx]; }
-    const float& operator[](size_t idx) const { return data_[idx]; }
+    float* data() { ensure_host_data(); return host_data_; }
+    const float* data() const { ensure_host_data(); return host_data_; }
+    float& operator[](size_t idx) { ensure_host_data(); return host_data_[idx]; }
+    const float& operator[](size_t idx) const { ensure_host_data(); return host_data_[idx]; }
     
     // Element access
     float& at(size_t i);
@@ -62,6 +65,16 @@ public:
     // Reshape
     void reshape(const std::vector<size_t>& new_shape);
     Tensor view(const std::vector<size_t>& new_shape) const;
+    
+    // Device management
+    bool is_cuda() const { return device_data_ != nullptr; }
+    int device_id() const { return device_id_; }
+    float* device_data() { return device_data_; }
+    const float* device_data() const { return device_data_; }
+    void to_device(int device_id = 0, cudaStream_t stream = 0) const;
+    void to_host(cudaStream_t stream = 0) const;
+    void sync_device_from_host(cudaStream_t stream = 0) const;
+    void sync_host_from_device(cudaStream_t stream = 0) const;
     
     // IO operations
     static Tensor load_from_file(const std::string& filename, ModelLoader* loader = nullptr);
@@ -80,13 +93,17 @@ public:
 private:
     std::vector<size_t> shape_;
     size_t size_;
-    float* data_;
-    bool owns_data_;
+  mutable float* host_data_;
+  mutable float* device_data_;
+  mutable bool owns_host_;
+  mutable bool owns_device_;
+  mutable int device_id_;
     
-    void allocate();
-    void deallocate();
+  void allocate_host() const;
+  void deallocate();
     size_t compute_size() const;
     size_t compute_stride(int dim) const;
+  void ensure_host_data() const;
 };
 
 // Tensor operations

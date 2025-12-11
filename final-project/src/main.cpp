@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 static int num_samples = 1;
+static int batch_size = 1;
 static bool run_validation = false;
 static bool run_warmup = false;
 
@@ -47,48 +48,51 @@ void write_float(std::ofstream& file, float value) {
 }
 
 void print_help() {
-  int mpi_rank;
-  MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-  if (mpi_rank == 0) {
-    fprintf(stdout,
-            " Usage: ./main  [-n 'num_samples'] [-v] [-w] [-h]\n");
-    fprintf(stdout, " Options:\n");
-    fprintf(stdout, "  -n: Number of input samples (default: 1)\n");
-    fprintf(stdout, "  -v: Enable validation (default: OFF)\n");
-    fprintf(stdout, "  -w: Enable warm-up (default: OFF)\n");
-    fprintf(stdout, "  -h: Print manual and options (default: OFF)\n");
-  }
+    int mpi_rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    if (mpi_rank == 0) {
+        fprintf(stdout,
+                " Usage: ./main  [-n 'num_samples'] [-b 'batch_size'] [-v] [-w] [-h]\n");
+        fprintf(stdout, " Options:\n");
+        fprintf(stdout, "  -n: Number of input samples (default: 1)\n");
+        fprintf(stdout, "  -b: Batch size (default: 1)\n");
+        fprintf(stdout, "  -v: Enable validation (default: OFF)\n");
+        fprintf(stdout, "  -w: Enable warm-up (default: OFF)\n");
+        fprintf(stdout, "  -h: Print manual and options (default: OFF)\n");
+    }
 }
 
 void parse_args(int argc, char **argv) {
-  int args;
-  while ((args = getopt(argc, argv, "n:vwh")) != -1) {
+    int args;
+    while ((args = getopt(argc, argv, "n:b:vwh")) != -1) {
     switch (args) {
-      case 'n': num_samples = atoi(optarg); break;
-      case 'v': run_validation = true; break;
-      case 'w': run_warmup = true; break;
-      case 'h':
-        print_help();
-        exit(0);
-        break;
-      default:
-        print_help();
-        exit(0);
-        break;
+        case 'n': num_samples = atoi(optarg); break;
+        case 'b': batch_size = atoi(optarg); break;
+        case 'v': run_validation = true; break;
+        case 'w': run_warmup = true; break;
+        case 'h':
+            print_help();
+            exit(0);
+            break;
+        default:
+            print_help();
+            exit(0);
+            break;
+        }
     }
-  }
   
-  int mpi_rank;
-  MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-  if (mpi_rank == 0) {
-    fprintf(stdout, "\n=============================================\n");
-    fprintf(stdout, " Model: LFM2-8B-A1B\n");
-    fprintf(stdout, "---------------------------------------------\n");
-    fprintf(stdout, " Validation: %s\n", run_validation ? "ON" : "OFF");
-    fprintf(stdout, " Warm-up: %s\n", run_warmup ? "ON" : "OFF");
-    fprintf(stdout, " Number of samples: %d\n", num_samples);
-    fprintf(stdout, "=============================================\n\n");
-  }
+    int mpi_rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    if (mpi_rank == 0) {
+        fprintf(stdout, "\n=============================================\n");
+        fprintf(stdout, " Model: LFM2-8B-A1B\n");
+        fprintf(stdout, "---------------------------------------------\n");
+        fprintf(stdout, " Validation: %s\n", run_validation ? "ON" : "OFF");
+        fprintf(stdout, " Warm-up: %s\n", run_warmup ? "ON" : "OFF");
+        fprintf(stdout, " Number of samples: %d\n", num_samples);
+        // fprintf(stdout, " Batch size: %d\n", batch_size);
+        fprintf(stdout, "=============================================\n\n");
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -166,10 +170,11 @@ int main(int argc, char* argv[]) {
     /* Warm-up */
     if (run_warmup && mpi_rank == 0) {
         fprintf(stdout, "Warming up...");
-        std::vector<int> warmup_input(inputs, inputs + seq_length);
+        int warm_batch = std::min(batch_size, num_samples);
+        std::vector<int> warmup_input(inputs, inputs + warm_batch * seq_length);
         Tensor warmup_logits;
         for (int i = 0; i < 3; i++) {
-            model.forward(warmup_input, warmup_logits);
+            model.forward(warmup_input, warm_batch, seq_length, warmup_logits);
         }
         fprintf(stdout, "Done!\n\n");
     }
@@ -196,18 +201,18 @@ int main(int argc, char* argv[]) {
 
     /* Call the main computation */
     if (mpi_rank == 0) {
-        for (int sample_idx = 0; sample_idx < num_samples; sample_idx++) {
-            // Get input for this sample
-            std::vector<int> input_ids_vec(inputs + sample_idx * seq_length, 
-                                          inputs + (sample_idx + 1) * seq_length);
-            
+        for (int sample_idx = 0; sample_idx < num_samples; sample_idx += batch_size) {
+            int cur_batch = std::min(batch_size, num_samples - sample_idx);
+            std::vector<int> input_ids_vec(inputs + sample_idx * seq_length,
+                                          inputs + (sample_idx + cur_batch) * seq_length);
             // Run forward pass
             Tensor logits;
-            model.forward(input_ids_vec, logits);
-            
+            model.forward(input_ids_vec, cur_batch, seq_length, logits);
             // Copy logits to output buffer
-            for (size_t i = 0; i < VOCAB_SIZE; i++) {
-                outputs[sample_idx * VOCAB_SIZE + i] = logits.at(0, i);
+            for (int b = 0; b < cur_batch; b++) {
+                for (size_t i = 0; i < VOCAB_SIZE; i++) {
+                    outputs[(sample_idx + b) * VOCAB_SIZE + i] = logits.at(b, i);
+                }
             }
         }
     }

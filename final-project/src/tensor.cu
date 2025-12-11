@@ -14,22 +14,25 @@ extern std::unique_ptr<ModelLoader> g_model_loader;
 // All tensor operations are implemented in layer.cu
 
 // Tensor constructors and destructors
-Tensor::Tensor() : size_(0), data_(nullptr), owns_data_(false) {}
+Tensor::Tensor() : size_(0), host_data_(nullptr), device_data_(nullptr),
+                   owns_host_(false), owns_device_(false), device_id_(0) {}
 
 Tensor::Tensor(const std::vector<size_t>& shape) 
-    : shape_(shape), owns_data_(true) {
+    : shape_(shape), host_data_(nullptr), device_data_(nullptr),
+      owns_host_(true), owns_device_(false), device_id_(0) {
     size_ = compute_size();
-    allocate();
+    allocate_host();
 }
 
 Tensor::Tensor(const std::vector<size_t>& shape, float* data, bool copy)
-    : shape_(shape), owns_data_(copy) {
+    : shape_(shape), host_data_(nullptr), device_data_(nullptr),
+      owns_host_(copy), owns_device_(false), device_id_(0) {
     size_ = compute_size();
     if (copy) {
-        allocate();
-        std::memcpy(data_, data, size_ * sizeof(float));
+        allocate_host();
+        std::memcpy(host_data_, data, size_ * sizeof(float));
     } else {
-        data_ = data;
+        host_data_ = data;
     }
 }
 
@@ -39,10 +42,12 @@ Tensor::~Tensor() {
 
 // Copy constructor
 Tensor::Tensor(const Tensor& other)
-    : shape_(other.shape_), size_(other.size_), owns_data_(true) {
+    : shape_(other.shape_), size_(other.size_), host_data_(nullptr), device_data_(nullptr),
+      owns_host_(true), owns_device_(false), device_id_(other.device_id_) {
     if (other.size_ > 0) {
-        allocate();
-        std::memcpy(data_, other.data_, size_ * sizeof(float));
+        other.to_host();
+        allocate_host();
+        std::memcpy(host_data_, other.host_data_, size_ * sizeof(float));
     }
 }
 
@@ -52,10 +57,13 @@ Tensor& Tensor::operator=(const Tensor& other) {
         deallocate();
         shape_ = other.shape_;
         size_ = other.size_;
-        owns_data_ = true;
+        device_id_ = other.device_id_;
+        owns_host_ = true;
+        owns_device_ = false;
         if (other.size_ > 0) {
-            allocate();
-            std::memcpy(data_, other.data_, size_ * sizeof(float));
+            other.to_host();
+            allocate_host();
+            std::memcpy(host_data_, other.host_data_, size_ * sizeof(float));
         }
     }
     return *this;
@@ -63,11 +71,15 @@ Tensor& Tensor::operator=(const Tensor& other) {
 
 // Move constructor
 Tensor::Tensor(Tensor&& other) noexcept
-    : shape_(std::move(other.shape_)), size_(other.size_),
-      data_(other.data_), owns_data_(other.owns_data_) {
-    other.data_ = nullptr;
-    other.size_ = 0;
-    other.owns_data_ = false;
+        : shape_(std::move(other.shape_)), size_(other.size_),
+            host_data_(other.host_data_), device_data_(other.device_data_),
+            owns_host_(other.owns_host_), owns_device_(other.owns_device_),
+            device_id_(other.device_id_) {
+        other.host_data_ = nullptr;
+        other.device_data_ = nullptr;
+        other.size_ = 0;
+        other.owns_host_ = false;
+        other.owns_device_ = false;
 }
 
 // Move assignment
@@ -76,26 +88,35 @@ Tensor& Tensor::operator=(Tensor&& other) noexcept {
         deallocate();
         shape_ = std::move(other.shape_);
         size_ = other.size_;
-        data_ = other.data_;
-        owns_data_ = other.owns_data_;
+        host_data_ = other.host_data_;
+        device_data_ = other.device_data_;
+        owns_host_ = other.owns_host_;
+        owns_device_ = other.owns_device_;
+        device_id_ = other.device_id_;
         
-        other.data_ = nullptr;
+        other.host_data_ = nullptr;
+        other.device_data_ = nullptr;
         other.size_ = 0;
-        other.owns_data_ = false;
+        other.owns_host_ = false;
+        other.owns_device_ = false;
     }
     return *this;
 }
 
-void Tensor::allocate() {
-    if (size_ > 0) {
-        data_ = new float[size_];
+void Tensor::allocate_host() const {
+    if (size_ > 0 && host_data_ == nullptr) {
+        host_data_ = new float[size_];
     }
 }
 
 void Tensor::deallocate() {
-    if (owns_data_ && data_ != nullptr) {
-        delete[] data_;
-        data_ = nullptr;
+    if (owns_host_ && host_data_ != nullptr) {
+        delete[] host_data_;
+        host_data_ = nullptr;
+    }
+    if (owns_device_ && device_data_ != nullptr) {
+        cudaFree(device_data_);
+        device_data_ = nullptr;
     }
 }
 
@@ -122,35 +143,43 @@ size_t Tensor::compute_stride(int dim) const {
 
 // Element access
 float& Tensor::at(size_t i) {
-    return data_[i];
+    ensure_host_data();
+    return host_data_[i];
 }
 
 float& Tensor::at(size_t i, size_t j) {
-    return data_[i * shape_[1] + j];
+    ensure_host_data();
+    return host_data_[i * shape_[1] + j];
 }
 
 float& Tensor::at(size_t i, size_t j, size_t k) {
-    return data_[(i * shape_[1] + j) * shape_[2] + k];
+    ensure_host_data();
+    return host_data_[(i * shape_[1] + j) * shape_[2] + k];
 }
 
 float& Tensor::at(size_t i, size_t j, size_t k, size_t l) {
-    return data_[((i * shape_[1] + j) * shape_[2] + k) * shape_[3] + l];
+    ensure_host_data();
+    return host_data_[((i * shape_[1] + j) * shape_[2] + k) * shape_[3] + l];
 }
 
 const float& Tensor::at(size_t i) const {
-    return data_[i];
+    ensure_host_data();
+    return host_data_[i];
 }
 
 const float& Tensor::at(size_t i, size_t j) const {
-    return data_[i * shape_[1] + j];
+    ensure_host_data();
+    return host_data_[i * shape_[1] + j];
 }
 
 const float& Tensor::at(size_t i, size_t j, size_t k) const {
-    return data_[(i * shape_[1] + j) * shape_[2] + k];
+    ensure_host_data();
+    return host_data_[(i * shape_[1] + j) * shape_[2] + k];
 }
 
 const float& Tensor::at(size_t i, size_t j, size_t k, size_t l) const {
-    return data_[((i * shape_[1] + j) * shape_[2] + k) * shape_[3] + l];
+    ensure_host_data();
+    return host_data_[((i * shape_[1] + j) * shape_[2] + k) * shape_[3] + l];
 }
 
 // Reshape
@@ -170,7 +199,11 @@ Tensor Tensor::view(const std::vector<size_t>& new_shape) const {
     }
     
     // Create a view that shares data with this tensor (no copy)
-    Tensor result(new_shape, data_, false);  // false means don't copy data
+    ensure_host_data();
+    Tensor result(new_shape, host_data_, false);  // false means don't copy data
+    result.device_data_ = device_data_;
+    result.device_id_ = device_id_;
+    result.owns_device_ = false;
     return result;
 }
 
@@ -233,29 +266,87 @@ void Tensor::save_to_file(const std::string& filename) const {
     }
     
     // Write data
-    file.write(reinterpret_cast<const char*>(data_), size_ * sizeof(float));
+    ensure_host_data();
+    file.write(reinterpret_cast<const char*>(host_data_), size_ * sizeof(float));
     
     file.close();
 }
 
 // Tensor operations
 Tensor Tensor::copy() const {
-    return Tensor(shape_, data_, true);
+    ensure_host_data();
+    return Tensor(shape_, host_data_, true);
 }
 
 void Tensor::fill(float value) {
-    std::fill(data_, data_ + size_, value);
+    ensure_host_data();
+    std::fill(host_data_, host_data_ + size_, value);
+    if (device_data_) sync_device_from_host();
 }
 
 void Tensor::zero() {
-    if (data_ != nullptr && size_ > 0) {
-        std::memset(data_, 0, size_ * sizeof(float));
+    ensure_host_data();
+    if (host_data_ != nullptr && size_ > 0) {
+        std::memset(host_data_, 0, size_ * sizeof(float));
+    }
+    if (device_data_) {
+        CHECK_CUDA(cudaMemset(device_data_, 0, size_ * sizeof(float)));
     }
 }
 
 void Tensor::ones() {
-    if (data_ != nullptr && size_ > 0) {
-        std::fill(data_, data_ + size_, 1.0f);
+    ensure_host_data();
+    if (host_data_ != nullptr && size_ > 0) {
+        std::fill(host_data_, host_data_ + size_, 1.0f);
     }
+    if (device_data_) sync_device_from_host();
+}
+
+void Tensor::ensure_host_data() const {
+    if (size_ == 0) return;
+    if (host_data_ == nullptr) {
+        host_data_ = new float[size_];
+        owns_host_ = true;
+        if (device_data_ != nullptr) {
+            CHECK_CUDA(cudaMemcpy(host_data_, device_data_, size_ * sizeof(float), cudaMemcpyDeviceToHost));
+        }
+    }
+}
+
+void Tensor::to_device(int device_id, cudaStream_t stream) const {
+    if (size_ == 0) return;
+    if (device_data_ != nullptr && device_id_ == device_id) return;
+    device_id_ = device_id;
+    CHECK_CUDA(cudaSetDevice(device_id_));
+    if (device_data_ == nullptr) {
+        CHECK_CUDA(cudaMalloc(&device_data_, size_ * sizeof(float)));
+        owns_device_ = true;
+    }
+    ensure_host_data();
+    CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+}
+
+void Tensor::to_host(cudaStream_t stream) const {
+    if (size_ == 0) return;
+    ensure_host_data();
+    if (device_data_ != nullptr) {
+        CHECK_CUDA(cudaMemcpyAsync(host_data_, device_data_, size_ * sizeof(float), cudaMemcpyDeviceToHost, stream));
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+    }
+}
+
+void Tensor::sync_device_from_host(cudaStream_t stream) const {
+    if (size_ == 0 || device_data_ == nullptr) return;
+    ensure_host_data();
+    CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+}
+
+void Tensor::sync_host_from_device(cudaStream_t stream) const {
+    if (size_ == 0 || device_data_ == nullptr) return;
+    ensure_host_data();
+    CHECK_CUDA(cudaMemcpyAsync(host_data_, device_data_, size_ * sizeof(float), cudaMemcpyDeviceToHost, stream));
+    CHECK_CUDA(cudaStreamSynchronize(stream));
 }
 

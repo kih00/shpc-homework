@@ -16,7 +16,7 @@ public:
     LFM2Model(const std::string& model_file);
     
     // Forward pass
-    void forward(const std::vector<int>& input_ids, Tensor& logits);
+    void forward(const std::vector<int>& input_ids, size_t batch, size_t seq_len, Tensor& logits);
     
 private:
     std::unique_ptr<ModelLoader> loader_;
