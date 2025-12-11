@@ -90,15 +90,17 @@ private:
 // Decoder Layer
 class DecoderLayer {
 public:
-    DecoderLayer(int layer_idx, bool is_attention_layer);
+    DecoderLayer(int layer_idx, bool is_attention_layer, int device_id);
     void forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
                  const Tensor* attention_mask, Tensor& output);
     
     bool is_attention_layer() const { return is_attention_layer_; }
+    int device_id() const { return device_id_; }
     
 private:
     int layer_idx_;
     bool is_attention_layer_;
+    int device_id_;  // GPU this layer runs on
     
     // Components
     std::unique_ptr<RMSNorm> input_layernorm_;

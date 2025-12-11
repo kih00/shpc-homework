@@ -33,7 +33,7 @@ __global__ void matmul_kernel(const float* A, const float* B, float* C,
     }
 }
 
-__global__ void matmul_trans_kernel(const float* A, const float* B, float* C,
+__global__ void matmul_transpose_kernel(const float* A, const float* B, float* C,
                                     size_t m, size_t k, size_t n) {
     size_t row = blockIdx.y * blockDim.y + threadIdx.y;
     size_t col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -201,9 +201,9 @@ void matmul(const Tensor& a, const Tensor& b, Tensor& c) {
     size_t k = a.size(1);
     size_t n = b.size(1);
     if (c.size() == 0) c = Tensor({m, n});
-    a.to_device();
-    b.to_device();
-    c.to_device();
+    a.to_device(-1);  // Use current device
+    b.to_device(-1);
+    c.to_device(-1);
     dim3 block(16, 16);
     dim3 grid = make_grid_2d(n, m, block.x, block.y);
     matmul_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
@@ -217,12 +217,12 @@ void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c) {
     size_t k = a.size(1);
     size_t n = b.size(0);
     if (c.size() == 0) c = Tensor({m, n});
-    a.to_device();
-    b.to_device();
-    c.to_device();
+    a.to_device(-1);
+    b.to_device(-1);
+    c.to_device(-1);
     dim3 block(16, 16);
     dim3 grid = make_grid_2d(n, m, block.x, block.y);
-    matmul_trans_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
+    matmul_transpose_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
     CHECK_CUDA(cudaDeviceSynchronize());
     c.sync_host_from_device();
 }
@@ -231,9 +231,9 @@ void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c) {
 void add(const Tensor& a, const Tensor& b, Tensor& c) {
     size_t n = a.size();
     if (c.size() == 0) c = Tensor(a.shape());
-    a.to_device();
-    b.to_device();
-    c.to_device();
+    a.to_device(-1);
+    b.to_device(-1);
+    c.to_device(-1);
     dim3 block(256);
     dim3 grid((n + block.x - 1) / block.x);
     add_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), n);
@@ -244,8 +244,8 @@ void add(const Tensor& a, const Tensor& b, Tensor& c) {
 void add_scalar(const Tensor& a, float b, Tensor& c) {
     size_t n = a.size();
     if (c.size() == 0) c = Tensor(a.shape());
-    a.to_device();
-    c.to_device();
+    a.to_device(-1);
+    c.to_device(-1);
     dim3 block(256);
     dim3 grid((n + block.x - 1) / block.x);
     add_scalar_kernel<<<grid, block>>>(a.device_data(), b, c.device_data(), n);
@@ -256,9 +256,9 @@ void add_scalar(const Tensor& a, float b, Tensor& c) {
 void mul(const Tensor& a, const Tensor& b, Tensor& c) {
     size_t n = a.size();
     if (c.size() == 0) c = Tensor(a.shape());
-    a.to_device();
-    b.to_device();
-    c.to_device();
+    a.to_device(-1);
+    b.to_device(-1);
+    c.to_device(-1);
     dim3 block(256);
     dim3 grid((n + block.x - 1) / block.x);
     mul_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), n);
@@ -269,8 +269,8 @@ void mul(const Tensor& a, const Tensor& b, Tensor& c) {
 void mul_scalar(const Tensor& a, float b, Tensor& c) {
     size_t n = a.size();
     if (c.size() == 0) c = Tensor(a.shape());
-    a.to_device();
-    c.to_device();
+    a.to_device(-1);
+    c.to_device(-1);
     dim3 block(256);
     dim3 grid((n + block.x - 1) / block.x);
     mul_scalar_kernel<<<grid, block>>>(a.device_data(), b, c.device_data(), n);
@@ -282,8 +282,8 @@ void mul_scalar(const Tensor& a, float b, Tensor& c) {
 void sigmoid(const Tensor& x, Tensor& y) {
     size_t n = x.size();
     if (y.size() == 0) y = Tensor(x.shape());
-    x.to_device();
-    y.to_device();
+    x.to_device(-1);
+    y.to_device(-1);
     dim3 block(256);
     dim3 grid((n + block.x - 1) / block.x);
     sigmoid_kernel<<<grid, block>>>(x.device_data(), y.device_data(), n);
@@ -294,8 +294,8 @@ void sigmoid(const Tensor& x, Tensor& y) {
 void silu(const Tensor& x, Tensor& y) {
     size_t n = x.size();
     if (y.size() == 0) y = Tensor(x.shape());
-    x.to_device();
-    y.to_device();
+    x.to_device(-1);
+    y.to_device(-1);
     dim3 block(256);
     dim3 grid((n + block.x - 1) / block.x);
     silu_kernel<<<grid, block>>>(x.device_data(), y.device_data(), n);
@@ -311,8 +311,8 @@ void softmax(const Tensor& x, Tensor& y, int dim) {
     }
     size_t inner_size = x.size(-1);
     if (y.size() == 0) y = Tensor(x.shape());
-    x.to_device();
-    y.to_device();
+    x.to_device(-1);
+    y.to_device(-1);
     dim3 block(inner_size >= 1024 ? 1024 : inner_size);
     dim3 grid(outer_size);
     softmax_kernel<<<grid, block>>>(x.device_data(), y.device_data(), inner_size);
@@ -328,9 +328,9 @@ void rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& y) {
     }
     size_t hidden_size = x.size(-1);
     if (y.size() == 0) y = Tensor(x.shape());
-    x.to_device();
-    weight.to_device();
-    y.to_device();
+    x.to_device(-1);
+    weight.to_device(-1);
+    y.to_device(-1);
     dim3 block(128);
     dim3 grid((outer_size + block.x - 1) / block.x);
     rms_norm_kernel<<<grid, block>>>(x.device_data(), weight.device_data(), eps,
@@ -344,8 +344,8 @@ void compute_rope_embeddings(size_t head_dim, size_t max_seq_len, float theta,
                              Tensor& cos, Tensor& sin) {
     if (cos.size() == 0) cos = Tensor({max_seq_len, head_dim});
     if (sin.size() == 0) sin = Tensor({max_seq_len, head_dim});
-    cos.to_device();
-    sin.to_device();
+    cos.to_device(-1);
+    sin.to_device(-1);
     dim3 block(256);
     dim3 grid((max_seq_len + block.x - 1) / block.x);
     rope_compute_kernel<<<grid, block>>>(cos.device_data(), sin.device_data(), head_dim, max_seq_len, theta);
@@ -367,10 +367,10 @@ void apply_rotary_pos_emb(Tensor& q, Tensor& k, const Tensor& cos, const Tensor&
     size_t num_kv_heads = k.size(1);
     size_t seq_len = q.size(2);
     size_t head_dim = q.size(3);
-    q.to_device();
-    k.to_device();
-    cos.to_device();
-    sin.to_device();
+    q.to_device(-1);
+    k.to_device(-1);
+    cos.to_device(-1);
+    sin.to_device(-1);
     size_t h_max = std::max(num_q_heads, num_kv_heads);
     dim3 grid(batch, h_max);
     dim3 block(seq_len);
@@ -391,8 +391,8 @@ void repeat_kv(const Tensor& x, size_t n_rep, Tensor& y) {
     size_t seq_len = x.size(2);
     size_t head_dim = x.size(3);
     if (y.size() == 0) y = Tensor({batch, num_kv_heads * n_rep, seq_len, head_dim});
-    x.to_device();
-    y.to_device();
+    x.to_device(-1);
+    y.to_device(-1);
     size_t total = batch * num_kv_heads * n_rep * seq_len * head_dim;
     dim3 block(256);
     dim3 grid((total + block.x - 1) / block.x);
@@ -414,10 +414,10 @@ void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias, Te
     size_t seq_len = x.size(2);
     size_t kernel_size = weight.size(2);
     if (y.size() == 0) y = Tensor({batch, channels, seq_len});
-    x.to_device();
-    weight.to_device();
-    if (bias) bias->to_device();
-    y.to_device();
+    x.to_device(-1);
+    weight.to_device(-1);
+    if (bias) bias->to_device(-1);
+    y.to_device(-1);
     size_t total = batch * channels * seq_len;
     dim3 block(256);
     dim3 grid((total + block.x - 1) / block.x);

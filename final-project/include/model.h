@@ -40,4 +40,9 @@ private:
     void load_embeddings();
     void load_layers();
     void load_output_layers();
+    
+    // Get GPU id for a given layer (0-23 -> GPU 0-3)
+    static int get_device_for_layer(int layer_idx) {
+        return layer_idx / 6;  // 24 layers / 4 GPUs = 6 layers per GPU
+    }
 };

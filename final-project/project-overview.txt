@@ -1,5 +1,11 @@
 deadline: 12/19 23:59:59
 
+[코드 작성 시 절대적으로 지켜야 할 규칙]
+- 이유 없이 스켈레톤 코드 훼손 절대 금지
+    - 스켈레톤 코드에 기본적으로 선언된 변수들은 무조건 활용하기
+    - 스켈레톤 코드의 의미와 의도를 이해하고 코드를 짜기. 이해 못하겠으면 그냥 짜지 말기
+- stdout 출력 절대 수정 불가
+
 [Allowed Modifications]
 - Changing memory layout
 - Reordering loop structures

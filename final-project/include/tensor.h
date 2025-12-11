@@ -76,6 +76,9 @@ public:
     void sync_device_from_host(cudaStream_t stream = 0) const;
     void sync_host_from_device(cudaStream_t stream = 0) const;
     
+    // Multi-GPU support: copy tensor to another device
+    void copy_to_device(int target_device, cudaStream_t stream = 0) const;
+    
     // IO operations
     static Tensor load_from_file(const std::string& filename, ModelLoader* loader = nullptr);
     void save_to_file(const std::string& filename) const;

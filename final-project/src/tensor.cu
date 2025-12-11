@@ -315,7 +315,26 @@ void Tensor::ensure_host_data() const {
 
 void Tensor::to_device(int device_id, cudaStream_t stream) const {
     if (size_ == 0) return;
+    
+    // If device_id is -1, use current device
+    if (device_id == -1) {
+        CHECK_CUDA(cudaGetDevice(&device_id));
+    }
+    
+    // If already on target device, do nothing
     if (device_data_ != nullptr && device_id_ == device_id) return;
+    
+    // If on a different device, free and reallocate
+    if (device_data_ != nullptr && owns_device_ && device_id_ != device_id) {
+        int old_device;
+        CHECK_CUDA(cudaGetDevice(&old_device));
+        CHECK_CUDA(cudaSetDevice(device_id_));
+        CHECK_CUDA(cudaFree(device_data_));
+        CHECK_CUDA(cudaSetDevice(old_device));
+        device_data_ = nullptr;
+        owns_device_ = false;
+    }
+    
     device_id_ = device_id;
     CHECK_CUDA(cudaSetDevice(device_id_));
     if (device_data_ == nullptr) {
@@ -348,5 +367,31 @@ void Tensor::sync_host_from_device(cudaStream_t stream) const {
     ensure_host_data();
     CHECK_CUDA(cudaMemcpyAsync(host_data_, device_data_, size_ * sizeof(float), cudaMemcpyDeviceToHost, stream));
     CHECK_CUDA(cudaStreamSynchronize(stream));
+}
+
+void Tensor::copy_to_device(int target_device, cudaStream_t stream) const {
+    if (size_ == 0) return;
+    
+    // If already on target device, do nothing
+    if (device_data_ != nullptr && device_id_ == target_device) return;
+    
+    // Free old device data if on a different device
+    if (device_data_ != nullptr && owns_device_ && device_id_ != target_device) {
+        int old_device;
+        CHECK_CUDA(cudaGetDevice(&old_device));
+        CHECK_CUDA(cudaSetDevice(device_id_));
+        CHECK_CUDA(cudaFree(device_data_));
+        CHECK_CUDA(cudaSetDevice(old_device));
+        device_data_ = nullptr;
+        owns_device_ = false;
+    }
+    
+    // Allocate on target device and copy
+    device_id_ = target_device;
+    CHECK_CUDA(cudaSetDevice(target_device));
+    CHECK_CUDA(cudaMalloc(&device_data_, size_ * sizeof(float)));
+    owns_device_ = true;
+    ensure_host_data();
+    CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
 }
 

@@ -486,8 +486,8 @@ void ShortConv::forward(const Tensor& x, Tensor& y) {
 }
 
 // DecoderLayer implementation
-DecoderLayer::DecoderLayer(int layer_idx, bool is_attention_layer)
-    : layer_idx_(layer_idx), is_attention_layer_(is_attention_layer) {
+DecoderLayer::DecoderLayer(int layer_idx, bool is_attention_layer, int device_id)
+    : layer_idx_(layer_idx), is_attention_layer_(is_attention_layer), device_id_(device_id) {
     
     // Load normalization layers
     std::stringstream ss_norm1, ss_norm2;
@@ -554,6 +554,12 @@ void DecoderLayer::forward(const Tensor& x, const Tensor& cos, const Tensor& sin
     tensor_ops::add(hidden_states, ffn_output, output);
 }
 
+void DecoderLayer::to_device() {
+    // This method would pre-transfer weights to the assigned GPU
+    // Currently weights are transferred on-demand during forward pass
+    // Can be optimized later for better performance
+}
+
 // ============================================================================
 // LFM2Model Implementation - Complete model
 // ============================================================================
@@ -588,8 +594,9 @@ void LFM2Model::load_layers() {
     layers_.reserve(NUM_HIDDEN_LAYERS);
     for (size_t i = 0; i < NUM_HIDDEN_LAYERS; i++) {
         bool is_attention = (LAYER_TYPES[i] == 0);
+        int device_id = get_device_for_layer(i);  // 6 layers per GPU
         std::cout << "  Layer " << i << ": " << (is_attention ? "Attention" : "Conv") << std::endl;
-        layers_.push_back(std::make_unique<DecoderLayer>(i, is_attention));
+        layers_.push_back(std::make_unique<DecoderLayer>(i, is_attention, device_id));
     }
 }
 
@@ -613,7 +620,7 @@ void LFM2Model::forward(const std::vector<int>& input_ids, size_t batch, size_t 
         throw std::runtime_error("Invalid batch/seq_len for forward");
     }
     
-    // Embedding lookup
+    // Embedding lookup (CPU side)
     Tensor hidden_states({batch, seq_len, HIDDEN_SIZE});
     for (size_t b = 0; b < batch; b++) {
         for (size_t i = 0; i < seq_len; i++) {
@@ -632,11 +639,30 @@ void LFM2Model::forward(const std::vector<int>& input_ids, size_t batch, size_t 
     // Create causal attention mask (not strictly needed for CPU impl)
     Tensor* attention_mask = nullptr;
     
-    // Pass through decoder layers
+    // Pass through decoder layers with multi-GPU pipeline
+    int current_device = 0;
     for (size_t i = 0; i < NUM_HIDDEN_LAYERS; i++) {
+        int layer_device = layers_[i]->device_id();
+        
+        // Transfer hidden states to the layer's GPU if device changed
+        if (layer_device != current_device) {
+            hidden_states.copy_to_device(layer_device);
+            cos.copy_to_device(layer_device);
+            sin.copy_to_device(layer_device);
+            current_device = layer_device;
+        }
+        
+        CHECK_CUDA(cudaSetDevice(layer_device));
+        
         Tensor output({batch, seq_len, HIDDEN_SIZE});
         layers_[i]->forward(hidden_states, cos, sin, attention_mask, output);
-        hidden_states = output;
+        hidden_states = std::move(output);
+    }
+    
+    // Final operations on GPU 3
+    CHECK_CUDA(cudaSetDevice(3));
+    if (current_device != 3) {
+        hidden_states.copy_to_device(3);
     }
     
     // Final norm
@@ -654,4 +680,7 @@ void LFM2Model::forward(const std::vector<int>& input_ids, size_t batch, size_t 
     Tensor last_hidden_flat = last_hidden.view({batch, HIDDEN_SIZE});
     logits = Tensor({batch, VOCAB_SIZE});
     tensor_ops::matmul_transposed(last_hidden_flat, lm_head_, logits);
+    
+    // Reset to device 0
+    CHECK_CUDA(cudaSetDevice(0));
 }
