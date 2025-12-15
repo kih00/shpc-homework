@@ -146,4 +146,11 @@ namespace tensor_ops {
     // Convolution
     void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias,
                        Tensor& y);
+
+    // Attention operations
+    void reshape_to_heads(const Tensor& in, Tensor& out,
+                          size_t batch, size_t seq_len, size_t num_heads, size_t head_dim);
+    void reshape_from_heads(const Tensor& in, Tensor& out,
+                            size_t batch, size_t seq_len, size_t num_heads, size_t head_dim);
+    void batched_attention(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& out, float scale);
 }

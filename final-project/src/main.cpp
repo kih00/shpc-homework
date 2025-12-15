@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include <cuda_profiler_api.h> // 제출 시 지우기
 #include <mpi.h>
 
 #include "model.h"
@@ -15,6 +16,7 @@ static int num_samples = 1;
 static int batch_size = 1;
 static bool run_validation = false;
 static bool run_warmup = false;
+static int num_warmup = 1;
 
 double get_time() {
   struct timespec tv;
@@ -90,6 +92,7 @@ void parse_args(int argc, char **argv) {
         fprintf(stdout, " Validation: %s\n", run_validation ? "ON" : "OFF");
         fprintf(stdout, " Warm-up: %s\n", run_warmup ? "ON" : "OFF");
         fprintf(stdout, " Number of samples: %d\n", num_samples);
+        fprintf(stdout, " [DEBUG] Batch size: %d\n", batch_size);
         // fprintf(stdout, " Batch size: %d\n", batch_size);
         fprintf(stdout, "=============================================\n\n");
     }
@@ -173,7 +176,7 @@ int main(int argc, char* argv[]) {
         int warm_batch = std::min(batch_size, num_samples);
         std::vector<int> warmup_input(inputs, inputs + warm_batch * seq_length);
         Tensor warmup_logits;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < num_warmup; i++) {
             model.forward(warmup_input, warm_batch, seq_length, warmup_logits);
         }
         fprintf(stdout, "Done!\n\n");
@@ -184,6 +187,7 @@ int main(int argc, char* argv[]) {
     ////////////////////////////////////////////////////////////////////
 
     double st = 0.0, et = 0.0;
+    cudaProfilerStart(); // 제출 시 지우기
 
     if (mpi_rank == 0) {
         fprintf(stdout, "Generating...");
@@ -205,6 +209,10 @@ int main(int argc, char* argv[]) {
             int cur_batch = std::min(batch_size, num_samples - sample_idx);
             std::vector<int> input_ids_vec(inputs + sample_idx * seq_length,
                                           inputs + (sample_idx + cur_batch) * seq_length);
+            // debug: print progress
+            std::cout << "\nProcessing samples " << sample_idx << " to "
+                      << (sample_idx + cur_batch - 1) << std::endl;
+
             // Run forward pass
             Tensor logits;
             model.forward(input_ids_vec, cur_batch, seq_length, logits);
@@ -232,6 +240,8 @@ int main(int argc, char* argv[]) {
         fprintf(stdout, "Throughput: %lf (samples/sec)\n\n", 
                 num_samples / (et - st));
     }
+
+    cudaProfilerStop(); // 제출 시 지우기
 
     ////////////////////////////////////////////////////////////////////
     // FINALIZATION                                                   //

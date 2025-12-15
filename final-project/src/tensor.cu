@@ -334,16 +334,32 @@ void Tensor::ensure_host_data() const {
 
 void Tensor::to_device(int device_id, cudaStream_t stream) const {
     if (size_ == 0) return;
-    
+
     // If device_id is -1, use current device
     if (device_id == -1) {
         CHECK_CUDA(cudaGetDevice(&device_id));
     }
-    
-    // If already on target device, do nothing
-    if (device_data_ != nullptr && device_id_ == device_id) return;
-    
-    // If on a different device, free and reallocate
+
+    // Case 1: Already on target device
+    if (device_data_ != nullptr && device_id_ == device_id) {
+        // Only copy if host has newer data
+        if (host_dirty_ && host_data_ != nullptr) {
+            CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
+            CHECK_CUDA(cudaStreamSynchronize(stream));
+            host_dirty_ = false;
+            device_dirty_ = false;
+        }
+        // Otherwise device is up-to-date, nothing to do
+        return;
+    }
+
+    // Case 2: On a different device or no device memory yet
+    // If device has latest data, sync to host first (for cross-device transfer)
+    if (device_data_ != nullptr && device_dirty_) {
+        ensure_host_data();  // This copies device->host if device_dirty_
+    }
+
+    // Free old device memory if on different device
     if (device_data_ != nullptr && owns_device_ && device_id_ != device_id) {
         int old_device;
         CHECK_CUDA(cudaGetDevice(&old_device));
@@ -353,16 +369,20 @@ void Tensor::to_device(int device_id, cudaStream_t stream) const {
         device_data_ = nullptr;
         owns_device_ = false;
     }
-    
+
+    // Allocate on target device
     device_id_ = device_id;
     CHECK_CUDA(cudaSetDevice(device_id_));
     if (device_data_ == nullptr) {
         CHECK_CUDA(cudaMalloc(&device_data_, size_ * sizeof(float)));
         owns_device_ = true;
     }
-    ensure_host_data();
-    CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
-    CHECK_CUDA(cudaStreamSynchronize(stream));
+
+    // Copy from host if host data exists
+    if (host_data_ != nullptr) {
+        CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+    }
     host_dirty_ = false;
     device_dirty_ = false;
 }

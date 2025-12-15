@@ -1,3 +1,4 @@
+개선사항: expert paralellism으로 수정
 $ ./run.sh -v -n 4
 =============================================
  Model: LFM2-8B-A1B

@@ -338,6 +338,115 @@ __global__ void causal_conv1d_kernel(
     y[idx] = sum;
 }
 
+// ============================================================================
+// Attention Kernels
+// ============================================================================
+
+// Reshape: (batch*seq, num_heads*head_dim) -> (batch, num_heads, seq, head_dim)
+__global__ void reshape_to_heads_kernel(
+    const float* in, float* out,
+    size_t batch, size_t seq_len, size_t num_heads, size_t head_dim) {
+
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = batch * num_heads * seq_len * head_dim;
+    if (idx >= total) return;
+
+    // Output index: [b, h, s, d]
+    size_t d = idx % head_dim;
+    size_t s = (idx / head_dim) % seq_len;
+    size_t h = (idx / (head_dim * seq_len)) % num_heads;
+    size_t b = idx / (head_dim * seq_len * num_heads);
+
+    // Input index: [b*seq + s, h*head_dim + d]
+    size_t in_idx = (b * seq_len + s) * (num_heads * head_dim) + h * head_dim + d;
+    out[idx] = in[in_idx];
+}
+
+// Reshape: (batch, num_heads, seq, head_dim) -> (batch*seq, num_heads*head_dim)
+__global__ void reshape_from_heads_kernel(
+    const float* in, float* out,
+    size_t batch, size_t seq_len, size_t num_heads, size_t head_dim) {
+
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = batch * seq_len * num_heads * head_dim;
+    if (idx >= total) return;
+
+    // Output index: [b*seq + s, h*head_dim + d]
+    size_t d = idx % head_dim;
+    size_t h = (idx / head_dim) % num_heads;
+    size_t s = (idx / (head_dim * num_heads)) % seq_len;
+    size_t b = idx / (head_dim * num_heads * seq_len);
+
+    // Input index: [b, h, s, d]
+    size_t in_idx = ((b * num_heads + h) * seq_len + s) * head_dim + d;
+    out[idx] = in[in_idx];
+}
+
+// Batched Scaled Dot-Product Attention with Causal Mask
+// Q, K, V: (batch, num_heads, seq_len, head_dim)
+// Output: (batch, num_heads, seq_len, head_dim)
+// Each block handles one (batch, head) pair, threads handle seq positions
+__global__ void batched_attention_kernel(
+    const float* Q, const float* K, const float* V, float* Out,
+    size_t batch, size_t num_heads, size_t seq_len, size_t head_dim, float scale) {
+
+    // Each block handles one (batch, head) pair
+    size_t bh = blockIdx.x;
+    size_t b = bh / num_heads;
+    size_t h = bh % num_heads;
+
+    if (b >= batch) return;
+
+    // Pointers to this head's Q, K, V, Out
+    const float* Q_head = Q + (b * num_heads + h) * seq_len * head_dim;
+    const float* K_head = K + (b * num_heads + h) * seq_len * head_dim;
+    const float* V_head = V + (b * num_heads + h) * seq_len * head_dim;
+    float* Out_head = Out + (b * num_heads + h) * seq_len * head_dim;
+
+    // Each thread handles one query position
+    for (size_t i = threadIdx.x; i < seq_len; i += blockDim.x) {
+        // Step 1: Compute attention scores for row i: Q[i] @ K^T
+        // and find max for numerical stability
+        float max_score = -INFINITY;
+
+        // First pass: compute scores and find max (only for j <= i due to causal mask)
+        // Use shared memory for scores if seq_len is small enough
+        extern __shared__ float shared_mem[];
+        float* scores = shared_mem + threadIdx.x * seq_len;
+
+        for (size_t j = 0; j <= i; j++) {
+            float score = 0.0f;
+            for (size_t d = 0; d < head_dim; d++) {
+                score += Q_head[i * head_dim + d] * K_head[j * head_dim + d];
+            }
+            score *= scale;
+            scores[j] = score;
+            max_score = fmaxf(max_score, score);
+        }
+
+        // Step 2: Compute softmax
+        float sum_exp = 0.0f;
+        for (size_t j = 0; j <= i; j++) {
+            scores[j] = expf(scores[j] - max_score);
+            sum_exp += scores[j];
+        }
+
+        float inv_sum = 1.0f / sum_exp;
+        for (size_t j = 0; j <= i; j++) {
+            scores[j] *= inv_sum;
+        }
+
+        // Step 3: Compute output: softmax(scores) @ V
+        for (size_t d = 0; d < head_dim; d++) {
+            float out_val = 0.0f;
+            for (size_t j = 0; j <= i; j++) {
+                out_val += scores[j] * V_head[j * head_dim + d];
+            }
+            Out_head[i * head_dim + d] = out_val;
+        }
+    }
+}
+
 // Matrix operations
 
 void matmul(const Tensor& a, const Tensor& b, Tensor& c) {
@@ -354,7 +463,6 @@ void matmul(const Tensor& a, const Tensor& b, Tensor& c) {
     matmul_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
     CHECK_CUDA(cudaDeviceSynchronize());
     c.mark_device_dirty();
-    c.to_host();
 }
 
 void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c) {
@@ -371,7 +479,6 @@ void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c) {
     matmul_transpose_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
     CHECK_CUDA(cudaDeviceSynchronize());
     c.mark_device_dirty();
-    c.to_host();
 }
 
 // Element-wise operations
@@ -573,6 +680,79 @@ void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias, Te
                                           y.device_data(), batch, channels, seq_len, kernel_size);
     CHECK_CUDA(cudaDeviceSynchronize());
     y.mark_device_dirty();
+}
+
+// ============================================================================
+// Attention Operations
+// ============================================================================
+
+// Reshape from (batch*seq, num_heads*head_dim) to (batch, num_heads, seq, head_dim)
+void reshape_to_heads(const Tensor& in, Tensor& out,
+                      size_t batch, size_t seq_len, size_t num_heads, size_t head_dim) {
+    if (out.size() == 0) out = Tensor({batch, num_heads, seq_len, head_dim});
+    in.to_device(-1);
+    out.to_device(-1);
+    size_t total = batch * num_heads * seq_len * head_dim;
+    dim3 block(BLOCK_OPS);
+    dim3 grid((total + block.x - 1) / block.x);
+    reshape_to_heads_kernel<<<grid, block>>>(in.device_data(), out.device_data(),
+                                              batch, seq_len, num_heads, head_dim);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    out.mark_device_dirty();
+}
+
+// Reshape from (batch, num_heads, seq, head_dim) to (batch*seq, num_heads*head_dim)
+void reshape_from_heads(const Tensor& in, Tensor& out,
+                        size_t batch, size_t seq_len, size_t num_heads, size_t head_dim) {
+    if (out.size() == 0) out = Tensor({batch * seq_len, num_heads * head_dim});
+    in.to_device(-1);
+    out.to_device(-1);
+    size_t total = batch * seq_len * num_heads * head_dim;
+    dim3 block(BLOCK_OPS);
+    dim3 grid((total + block.x - 1) / block.x);
+    reshape_from_heads_kernel<<<grid, block>>>(in.device_data(), out.device_data(),
+                                                batch, seq_len, num_heads, head_dim);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    out.mark_device_dirty();
+}
+
+// Batched scaled dot-product attention with causal mask
+// Q, K, V: (batch, num_heads, seq_len, head_dim)
+// Output: (batch, num_heads, seq_len, head_dim)
+void batched_attention(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& out, float scale) {
+    size_t batch = Q.size(0);
+    size_t num_heads = Q.size(1);
+    size_t seq_len = Q.size(2);
+    size_t head_dim = Q.size(3);
+
+    if (out.size() == 0) out = Tensor({batch, num_heads, seq_len, head_dim});
+
+    Q.to_device(-1);
+    K.to_device(-1);
+    V.to_device(-1);
+    out.to_device(-1);
+
+    // Each block handles one (batch, head) pair
+    // Each thread handles multiple query positions
+    size_t num_blocks = batch * num_heads;
+    size_t threads_per_block = std::min((size_t)256, seq_len);
+
+    // Shared memory: each thread needs seq_len floats for scores
+    size_t shared_mem_size = threads_per_block * seq_len * sizeof(float);
+
+    // Check if shared memory is sufficient (max ~48KB on most GPUs)
+    if (shared_mem_size > 48 * 1024) {
+        // Fallback: reduce threads or use different algorithm
+        threads_per_block = (48 * 1024) / (seq_len * sizeof(float));
+        if (threads_per_block < 1) threads_per_block = 1;
+        shared_mem_size = threads_per_block * seq_len * sizeof(float);
+    }
+
+    batched_attention_kernel<<<num_blocks, threads_per_block, shared_mem_size>>>(
+        Q.device_data(), K.device_data(), V.device_data(), out.device_data(),
+        batch, num_heads, seq_len, head_dim, scale);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    out.mark_device_dirty();
 }
 
 } // namespace tensor_ops

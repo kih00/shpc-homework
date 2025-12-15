@@ -7,6 +7,7 @@
 #include <random>
 #include <cstring>
 #include <utility>
+#include <omp.h>
 
 // Global model loader (definition)
 std::unique_ptr<ModelLoader> g_model_loader;
@@ -157,27 +158,24 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
     size_t batch = x.size(0);
     size_t seq_len = x.size(1);
     size_t hidden_size = x.size(2);
-    const int base_device = 0;  // keep activations resident on GPU 0
-    
+    const int base_device = 0;
+
     // Ensure host view is up-to-date for routing decisions
     x.to_host();
-    
+
     // Flatten
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
-    
-    // Compute router logits
+
+    // Compute router logits on base device
+    CHECK_CUDA(cudaSetDevice(base_device));
     router_logits = Tensor({batch * seq_len, NUM_EXPERTS});
     tensor_ops::matmul_transposed(x_flat, gate_, router_logits);
     router_logits.to_host();
-    
+
     // Route tokens
     std::vector<int> top_k_indices;
     std::vector<float> top_k_weights;
     route_tokens(router_logits, top_k_indices, top_k_weights);
-    
-    // Initialize output
-    y = Tensor({batch, seq_len, hidden_size});
-    y.zero();
 
     // Bucket tokens per expert for batched dispatch
     std::vector<std::vector<size_t>> tokens_per_expert(NUM_EXPERTS);
@@ -191,14 +189,37 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
         }
     }
 
-    // Dispatch experts across 4 GPUs, gather results back to base_device
+    // Prepare per-GPU expert inputs and outputs
+    // Group experts by device
+    std::vector<std::vector<size_t>> experts_on_device(EXPERT_PARALLEL_GPUS);
+    for (size_t e = 0; e < NUM_EXPERTS; e++) {
+        int dev = expert_devices_[e];
+        if (tokens_per_expert[e].size() > 0) {
+            experts_on_device[dev].push_back(e);
+        }
+    }
+
+    // Storage for expert outputs per GPU (to be filled in parallel)
+    std::vector<std::vector<Tensor>> expert_outputs(EXPERT_PARALLEL_GPUS);
+    std::vector<std::vector<size_t>> expert_indices(EXPERT_PARALLEL_GPUS);
+
     for (int dev = 0; dev < EXPERT_PARALLEL_GPUS; dev++) {
+        expert_outputs[dev].resize(experts_on_device[dev].size());
+        expert_indices[dev] = experts_on_device[dev];
+    }
+
+    // Parallel execution across 4 GPUs using OpenMP
+    #pragma omp parallel num_threads(EXPERT_PARALLEL_GPUS)
+    {
+        int dev = omp_get_thread_num();
         CHECK_CUDA(cudaSetDevice(dev));
-        for (size_t expert_idx = 0; expert_idx < NUM_EXPERTS; expert_idx++) {
-            if (expert_devices_[expert_idx] != dev) continue;
+
+        for (size_t i = 0; i < expert_indices[dev].size(); i++) {
+            size_t expert_idx = expert_indices[dev][i];
             const auto& token_list = tokens_per_expert[expert_idx];
             const auto& weight_list = weights_per_expert[expert_idx];
             size_t tok_count = token_list.size();
+
             if (tok_count == 0) continue;
 
             // Pack tokens for this expert
@@ -215,8 +236,25 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
             experts_[expert_idx].forward(expert_in, expert_out);
             expert_out.to_host();
 
-            // Accumulate back on host (kept small compared to full hidden_states transfers)
-            for (size_t idx = 0; idx < tok_count; idx++) {
+            // Store output for later accumulation
+            expert_outputs[dev][i] = std::move(expert_out);
+        }
+    }
+
+    // Accumulate results on host (single-threaded to avoid race conditions)
+    y = Tensor({batch, seq_len, hidden_size});
+    y.zero();
+
+    for (int dev = 0; dev < EXPERT_PARALLEL_GPUS; dev++) {
+        for (size_t i = 0; i < expert_indices[dev].size(); i++) {
+            size_t expert_idx = expert_indices[dev][i];
+            const auto& token_list = tokens_per_expert[expert_idx];
+            const auto& weight_list = weights_per_expert[expert_idx];
+            const Tensor& expert_out = expert_outputs[dev][i];
+
+            if (expert_out.size() == 0) continue;
+
+            for (size_t idx = 0; idx < token_list.size(); idx++) {
                 size_t t = token_list[idx];
                 size_t b = t / seq_len;
                 size_t s = t % seq_len;
@@ -258,133 +296,99 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
     size_t batch = x.size(0);
     size_t seq_len = x.size(1);
     size_t hidden_size = x.size(2);
-    
+
     // Flatten
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
-    
-    // Project Q, K, V
+
+    // Project Q, K, V (GPU)
     Tensor q_proj_out({batch * seq_len, NUM_ATTENTION_HEADS * HEAD_DIM});
     Tensor k_proj_out({batch * seq_len, NUM_KEY_VALUE_HEADS * HEAD_DIM});
     Tensor v_proj_out({batch * seq_len, NUM_KEY_VALUE_HEADS * HEAD_DIM});
-    
+
     tensor_ops::matmul_transposed(x_flat, q_proj_, q_proj_out);
     tensor_ops::matmul_transposed(x_flat, k_proj_, k_proj_out);
     tensor_ops::matmul_transposed(x_flat, v_proj_, v_proj_out);
-    
-    // Reshape to (batch, seq_len, num_heads, head_dim) for layernorm
-    Tensor q_reshaped({batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM});
-    Tensor k_reshaped({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
+
+    // Reshape Q to (batch, num_heads, seq, head_dim) for layernorm then attention
+    // Note: layernorm expects (batch, seq, heads, head_dim), so we do intermediate reshape
+    Tensor q_for_norm({batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM});
+    Tensor k_for_norm({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
     Tensor v_reshaped({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
-    
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t s = 0; s < seq_len; s++) {
-            for (size_t h = 0; h < NUM_ATTENTION_HEADS; h++) {
-                for (size_t d = 0; d < HEAD_DIM; d++) {
-                    q_reshaped.at(b, s, h, d) = q_proj_out.at(b * seq_len + s, h * HEAD_DIM + d);
-                }
-            }
-            for (size_t h = 0; h < NUM_KEY_VALUE_HEADS; h++) {
-                for (size_t d = 0; d < HEAD_DIM; d++) {
-                    k_reshaped.at(b, s, h, d) = k_proj_out.at(b * seq_len + s, h * HEAD_DIM + d);
-                    v_reshaped.at(b, s, h, d) = v_proj_out.at(b * seq_len + s, h * HEAD_DIM + d);
+
+    // GPU reshape: (batch*seq, heads*dim) -> (batch, seq, heads, dim)
+    // We need a slightly different kernel for this layout
+    // For now, use reshape_to_heads which gives (batch, heads, seq, dim) and transpose in RMSNorm
+    // Actually, let's just reshape properly for layernorm input
+
+    // Reshape for layernorm: (batch*seq, heads*dim) -> (batch, seq, heads, dim)
+    {
+        q_proj_out.to_host();
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t s = 0; s < seq_len; s++) {
+                for (size_t h = 0; h < NUM_ATTENTION_HEADS; h++) {
+                    for (size_t d = 0; d < HEAD_DIM; d++) {
+                        q_for_norm.at(b, s, h, d) = q_proj_out.at(b * seq_len + s, h * HEAD_DIM + d);
+                    }
                 }
             }
         }
     }
-    
+    {
+        k_proj_out.to_host();
+        v_proj_out.to_host();
+        for (size_t b = 0; b < batch; b++) {
+            for (size_t s = 0; s < seq_len; s++) {
+                for (size_t h = 0; h < NUM_KEY_VALUE_HEADS; h++) {
+                    for (size_t d = 0; d < HEAD_DIM; d++) {
+                        k_for_norm.at(b, s, h, d) = k_proj_out.at(b * seq_len + s, h * HEAD_DIM + d);
+                        v_reshaped.at(b, s, h, d) = v_proj_out.at(b * seq_len + s, h * HEAD_DIM + d);
+                    }
+                }
+            }
+        }
+    }
+
     // Apply layernorm to Q and K (normalizes over last dim = head_dim)
     Tensor q_normed({batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM});
     Tensor k_normed({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
-    q_layernorm_->forward(q_reshaped, q_normed);
-    k_layernorm_->forward(k_reshaped, k_normed);
-    
-    // Transpose to (batch, num_heads, seq_len, head_dim) for attention
+    q_layernorm_->forward(q_for_norm, q_normed);
+    k_layernorm_->forward(k_for_norm, k_normed);
+
+    // Transpose to (batch, num_heads, seq_len, head_dim) for attention (GPU)
     Tensor q({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
     Tensor k({batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
     Tensor v({batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
-    
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t s = 0; s < seq_len; s++) {
-            for (size_t h = 0; h < NUM_ATTENTION_HEADS; h++) {
-                for (size_t d = 0; d < HEAD_DIM; d++) {
-                    q.at(b, h, s, d) = q_normed.at(b, s, h, d);
-                }
-            }
-            for (size_t h = 0; h < NUM_KEY_VALUE_HEADS; h++) {
-                for (size_t d = 0; d < HEAD_DIM; d++) {
-                    k.at(b, h, s, d) = k_normed.at(b, s, h, d);
-                    v.at(b, h, s, d) = v_reshaped.at(b, s, h, d);
-                }
-            }
-        }
-    }
-    
-    // Apply RoPE
+
+    // GPU transpose: (batch, seq, heads, dim) -> (batch, heads, seq, dim)
+    tensor_ops::reshape_to_heads(q_normed.view({batch * seq_len, NUM_ATTENTION_HEADS * HEAD_DIM}),
+                                  q, batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM);
+    tensor_ops::reshape_to_heads(k_normed.view({batch * seq_len, NUM_KEY_VALUE_HEADS * HEAD_DIM}),
+                                  k, batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM);
+    tensor_ops::reshape_to_heads(v_reshaped.view({batch * seq_len, NUM_KEY_VALUE_HEADS * HEAD_DIM}),
+                                  v, batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM);
+
+    // Apply RoPE (GPU)
     tensor_ops::apply_rotary_pos_emb(q, k, cos, sin);
-    
-    // Repeat K, V for GQA
+
+    // Repeat K, V for GQA (GPU)
     Tensor k_repeated({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
     Tensor v_repeated({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
     tensor_ops::repeat_kv(k, NUM_KEY_VALUE_GROUPS, k_repeated);
     tensor_ops::repeat_kv(v, NUM_KEY_VALUE_GROUPS, v_repeated);
-    
-    // Compute attention
+
+    // Compute attention (GPU) - Q @ K^T, causal mask, softmax, @ V
     float scale = 1.0f / std::sqrt((float)HEAD_DIM);
     Tensor attn_output({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
-    
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t h = 0; h < NUM_ATTENTION_HEADS; h++) {
-            // Compute Q @ K^T
-            Tensor scores({seq_len, seq_len});
-            for (size_t i = 0; i < seq_len; i++) {
-                for (size_t j = 0; j < seq_len; j++) {
-                    float sum = 0.0f;
-                    for (size_t d = 0; d < HEAD_DIM; d++) {
-                        sum += q.at(b, h, i, d) * k_repeated.at(b, h, j, d);
-                    }
-                    scores.at(i, j) = sum * scale;
-                }
-            }
-            
-            // Apply causal mask
-            for (size_t i = 0; i < seq_len; i++) {
-                for (size_t j = i + 1; j < seq_len; j++) {
-                    scores.at(i, j) = -INFINITY;
-                }
-            }
-            
-            // Softmax
-            Tensor attn_weights({seq_len, seq_len});
-            tensor_ops::softmax(scores, attn_weights, -1);
-            
-            // Multiply by V
-            for (size_t i = 0; i < seq_len; i++) {
-                for (size_t d = 0; d < HEAD_DIM; d++) {
-                    float sum = 0.0f;
-                    for (size_t j = 0; j < seq_len; j++) {
-                        sum += attn_weights.at(i, j) * v_repeated.at(b, h, j, d);
-                    }
-                    attn_output.at(b, h, i, d) = sum;
-                }
-            }
-        }
-    }
-    
-    // Reshape and project output
+    tensor_ops::batched_attention(q, k_repeated, v_repeated, attn_output, scale);
+
+    // Reshape output: (batch, heads, seq, dim) -> (batch*seq, heads*dim) (GPU)
     Tensor attn_flat({batch * seq_len, hidden_size});
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t s = 0; s < seq_len; s++) {
-            for (size_t h = 0; h < NUM_ATTENTION_HEADS; h++) {
-                for (size_t d = 0; d < HEAD_DIM; d++) {
-                    attn_flat.at(b * seq_len + s, h * HEAD_DIM + d) = attn_output.at(b, h, s, d);
-                }
-            }
-        }
-    }
-    
+    tensor_ops::reshape_from_heads(attn_output, attn_flat, batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM);
+
+    // Output projection (GPU)
     Tensor output_flat({batch * seq_len, hidden_size});
     tensor_ops::matmul_transposed(attn_flat, o_proj_, output_flat);
-    
+
     output_flat.reshape({batch, seq_len, hidden_size});
     output = std::move(output_flat);
 }
@@ -582,6 +586,12 @@ void DecoderLayer::forward(const Tensor& x, const Tensor& cos, const Tensor& sin
 // ============================================================================
 // LFM2Model Implementation - Complete model
 // ============================================================================
+double get_time_layer() {
+  struct timespec tv;
+  clock_gettime(CLOCK_MONOTONIC, &tv);
+
+  return tv.tv_sec + tv.tv_nsec * 1e-9;
+}
 
 LFM2Model::LFM2Model(const std::string& model_file) {
     std::cout << "Loading LFM2-8B-A1B model from " << model_file << std::endl;
@@ -666,9 +676,15 @@ void LFM2Model::forward(const std::vector<int>& input_ids, size_t batch, size_t 
     sin.copy_to_device(0);
     
     for (size_t i = 0; i < NUM_HIDDEN_LAYERS; i++) {
+        double start_time = get_time_layer();
+
         Tensor output({batch, seq_len, HIDDEN_SIZE});
         layers_[i]->forward(hidden_states, cos, sin, attention_mask, output);
         hidden_states = std::move(output);
+
+        // debug: print progress
+        double end_time = get_time_layer();
+        std::cout << "  Layer " << i << " forward time: " << (end_time - start_time) << " seconds" << std::endl;
     }
     
     // Final operations on GPU 3
