@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <random>
 #include <cstring>
+#include <utility>
 
 // Global model loader (definition)
 std::unique_ptr<ModelLoader> g_model_loader;
@@ -55,12 +56,7 @@ void MLP::forward(const Tensor& x, Tensor& y) {
     
     // Reshape and assign to output
     y_flat.reshape({batch, seq_len, hidden_size});
-    
-    // If y is not allocated, allocate it
-    if (y.size() == 0) {
-        y = Tensor({batch, seq_len, hidden_size});
-    }
-    std::memcpy(y.data(), y_flat.data(), y.size() * sizeof(float));
+    y = std::move(y_flat);
 }
 
 // SparseMoeBlock implementation
@@ -79,6 +75,12 @@ SparseMoeBlock::SparseMoeBlock(int layer_idx) {
         ss_w3 << "layers." << layer_idx << ".feed_forward.experts." << i << ".w3.weight";
         
         experts_.emplace_back(ss_w1.str(), ss_w2.str(), ss_w3.str());
+    }
+
+    // Assign experts to 4 GPUs in a round-robin fashion (expert parallelism)
+    expert_devices_.resize(NUM_EXPERTS);
+    for (size_t i = 0; i < NUM_EXPERTS; i++) {
+        expert_devices_[i] = static_cast<int>(i % EXPERT_PARALLEL_GPUS);
     }
     
     // Load expert bias if used
@@ -155,6 +157,10 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
     size_t batch = x.size(0);
     size_t seq_len = x.size(1);
     size_t hidden_size = x.size(2);
+    const int base_device = 0;  // keep activations resident on GPU 0
+    
+    // Ensure host view is up-to-date for routing decisions
+    x.to_host();
     
     // Flatten
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
@@ -162,6 +168,7 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
     // Compute router logits
     router_logits = Tensor({batch * seq_len, NUM_EXPERTS});
     tensor_ops::matmul_transposed(x_flat, gate_, router_logits);
+    router_logits.to_host();
     
     // Route tokens
     std::vector<int> top_k_indices;
@@ -171,32 +178,59 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
     // Initialize output
     y = Tensor({batch, seq_len, hidden_size});
     y.zero();
-    
-    // Process each token through selected experts
+
+    // Bucket tokens per expert for batched dispatch
+    std::vector<std::vector<size_t>> tokens_per_expert(NUM_EXPERTS);
+    std::vector<std::vector<float>> weights_per_expert(NUM_EXPERTS);
     for (size_t t = 0; t < batch * seq_len; t++) {
-        size_t b = t / seq_len;
-        size_t s = t % seq_len;
-        
         for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; k++) {
             int expert_idx = top_k_indices[t * NUM_EXPERTS_PER_TOK + k];
             float weight = top_k_weights[t * NUM_EXPERTS_PER_TOK + k];
-            
-            // Get token input
-            Tensor token_in({1, 1, hidden_size});
-            for (size_t h = 0; h < hidden_size; h++) {
-                token_in.at(0, 0, h) = x_flat.at(t, h);
+            tokens_per_expert[expert_idx].push_back(t);
+            weights_per_expert[expert_idx].push_back(weight);
+        }
+    }
+
+    // Dispatch experts across 4 GPUs, gather results back to base_device
+    for (int dev = 0; dev < EXPERT_PARALLEL_GPUS; dev++) {
+        CHECK_CUDA(cudaSetDevice(dev));
+        for (size_t expert_idx = 0; expert_idx < NUM_EXPERTS; expert_idx++) {
+            if (expert_devices_[expert_idx] != dev) continue;
+            const auto& token_list = tokens_per_expert[expert_idx];
+            const auto& weight_list = weights_per_expert[expert_idx];
+            size_t tok_count = token_list.size();
+            if (tok_count == 0) continue;
+
+            // Pack tokens for this expert
+            Tensor expert_in({tok_count, 1, hidden_size});
+            for (size_t idx = 0; idx < tok_count; idx++) {
+                size_t t = token_list[idx];
+                for (size_t h = 0; h < hidden_size; h++) {
+                    expert_in.at(idx, 0, h) = x_flat.at(t, h);
+                }
             }
-            
-            // Expert forward
-            Tensor expert_out({1, 1, hidden_size});
-            experts_[expert_idx].forward(token_in, expert_out);
-            
-            // Add weighted output directly to y (no view)
-            for (size_t h = 0; h < hidden_size; h++) {
-                y.at(b, s, h) += weight * expert_out.at(0, 0, h);
+
+            // Execute expert on its owning GPU
+            Tensor expert_out;
+            experts_[expert_idx].forward(expert_in, expert_out);
+            expert_out.to_host();
+
+            // Accumulate back on host (kept small compared to full hidden_states transfers)
+            for (size_t idx = 0; idx < tok_count; idx++) {
+                size_t t = token_list[idx];
+                size_t b = t / seq_len;
+                size_t s = t % seq_len;
+                float w = weight_list[idx];
+                for (size_t h = 0; h < hidden_size; h++) {
+                    y.at(b, s, h) += w * expert_out.at(idx, 0, h);
+                }
             }
         }
     }
+
+    // Keep output resident on base device for downstream layers
+    y.copy_to_device(base_device);
+    CHECK_CUDA(cudaSetDevice(base_device));
 }
 
 // Attention implementation
@@ -352,12 +386,7 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
     tensor_ops::matmul_transposed(attn_flat, o_proj_, output_flat);
     
     output_flat.reshape({batch, seq_len, hidden_size});
-    
-    // Allocate output if needed
-    if (output.size() == 0) {
-        output = Tensor({batch, seq_len, hidden_size});
-    }
-    std::memcpy(output.data(), output_flat.data(), output.size() * sizeof(float));
+    output = std::move(output_flat);
 }
 
 // ShortConv implementation
@@ -478,11 +507,7 @@ void ShortConv::forward(const Tensor& x, Tensor& y) {
     
     // Reshape back to (batch, seq_len, hidden_size)
     y_flat.reshape({batch, seq_len, hidden_size});
-    
-    if (y.size() == 0) {
-        y = Tensor({batch, seq_len, hidden_size});
-    }
-    std::memcpy(y.data(), y_flat.data(), y.size() * sizeof(float));
+    y = std::move(y_flat);
 }
 
 // DecoderLayer implementation
@@ -554,12 +579,6 @@ void DecoderLayer::forward(const Tensor& x, const Tensor& cos, const Tensor& sin
     tensor_ops::add(hidden_states, ffn_output, output);
 }
 
-void DecoderLayer::to_device() {
-    // This method would pre-transfer weights to the assigned GPU
-    // Currently weights are transferred on-demand during forward pass
-    // Can be optimized later for better performance
-}
-
 // ============================================================================
 // LFM2Model Implementation - Complete model
 // ============================================================================
@@ -594,7 +613,8 @@ void LFM2Model::load_layers() {
     layers_.reserve(NUM_HIDDEN_LAYERS);
     for (size_t i = 0; i < NUM_HIDDEN_LAYERS; i++) {
         bool is_attention = (LAYER_TYPES[i] == 0);
-        int device_id = get_device_for_layer(i);  // 6 layers per GPU
+        // Keep non-MoE work on a single base GPU (0); expert parallelism will spread work across GPUs inside MoE blocks.
+        int device_id = 0;
         std::cout << "  Layer " << i << ": " << (is_attention ? "Attention" : "Conv") << std::endl;
         layers_.push_back(std::make_unique<DecoderLayer>(i, is_attention, device_id));
     }
@@ -639,21 +659,13 @@ void LFM2Model::forward(const std::vector<int>& input_ids, size_t batch, size_t 
     // Create causal attention mask (not strictly needed for CPU impl)
     Tensor* attention_mask = nullptr;
     
-    // Pass through decoder layers with multi-GPU pipeline
-    int current_device = 0;
+    // Keep activations on base GPU (0) and let MoE dispatch handle expert parallelism internally.
+    CHECK_CUDA(cudaSetDevice(0));
+    hidden_states.copy_to_device(0);
+    cos.copy_to_device(0);
+    sin.copy_to_device(0);
+    
     for (size_t i = 0; i < NUM_HIDDEN_LAYERS; i++) {
-        int layer_device = layers_[i]->device_id();
-        
-        // Transfer hidden states to the layer's GPU if device changed
-        if (layer_device != current_device) {
-            hidden_states.copy_to_device(layer_device);
-            cos.copy_to_device(layer_device);
-            sin.copy_to_device(layer_device);
-            current_device = layer_device;
-        }
-        
-        CHECK_CUDA(cudaSetDevice(layer_device));
-        
         Tensor output({batch, seq_len, HIDDEN_SIZE});
         layers_[i]->forward(hidden_states, cos, sin, attention_mask, output);
         hidden_states = std::move(output);
@@ -661,15 +673,14 @@ void LFM2Model::forward(const std::vector<int>& input_ids, size_t batch, size_t 
     
     // Final operations on GPU 3
     CHECK_CUDA(cudaSetDevice(3));
-    if (current_device != 3) {
-        hidden_states.copy_to_device(3);
-    }
+    hidden_states.copy_to_device(3);
     
     // Final norm
     Tensor normed_output({batch, seq_len, HIDDEN_SIZE});
     norm_->forward(hidden_states, normed_output);
     
     // LM head projection (only for last token in generation)
+    normed_output.to_host();
     Tensor last_hidden({batch, 1, HIDDEN_SIZE});
     for (size_t b = 0; b < batch; b++) {
         for (size_t i = 0; i < HIDDEN_SIZE; i++) {

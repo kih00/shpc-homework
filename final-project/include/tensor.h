@@ -46,9 +46,9 @@ public:
     size_t size(int dim) const;
     
     // Data access
-    float* data() { ensure_host_data(); return host_data_; }
+    float* data() { ensure_host_data(); mark_host_dirty(); return host_data_; }
     const float* data() const { ensure_host_data(); return host_data_; }
-    float& operator[](size_t idx) { ensure_host_data(); return host_data_[idx]; }
+    float& operator[](size_t idx) { ensure_host_data(); mark_host_dirty(); return host_data_[idx]; }
     const float& operator[](size_t idx) const { ensure_host_data(); return host_data_[idx]; }
     
     // Element access
@@ -93,6 +93,10 @@ public:
     void zero();
     void ones();
 
+    // Dirty-state helpers for device/host freshness
+    void mark_device_dirty() const { device_dirty_ = true; host_dirty_ = false; }
+    void mark_host_dirty() const { host_dirty_ = true; device_dirty_ = false; }
+
 private:
     std::vector<size_t> shape_;
     size_t size_;
@@ -101,6 +105,8 @@ private:
   mutable bool owns_host_;
   mutable bool owns_device_;
   mutable int device_id_;
+  mutable bool host_dirty_;
+  mutable bool device_dirty_;
     
   void allocate_host() const;
   void deallocate();

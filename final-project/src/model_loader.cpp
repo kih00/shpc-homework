@@ -1,6 +1,7 @@
 #include "model_loader.h"
 #include <stdexcept>
 #include <iostream>
+#include <limits>
 
 ModelLoader::ModelLoader(const std::string& model_file) : model_file_(model_file) {
     load_index();
@@ -62,6 +63,17 @@ Tensor ModelLoader::load_tensor(const std::string& name) {
     }
     
     const TensorInfo& info = it->second;
+    // Sanity-check size to avoid buffer overruns
+    uint64_t expected_bytes = sizeof(float);
+    for (size_t dim : info.shape) {
+        if (dim == 0 || expected_bytes > (std::numeric_limits<uint64_t>::max() / dim)) {
+            throw std::runtime_error("Invalid shape for tensor: " + name);
+        }
+        expected_bytes *= dim;
+    }
+    if (info.size > expected_bytes) {
+        throw std::runtime_error("Tensor size larger than buffer: " + name);
+    }
     
     // Create tensor with shape
     Tensor tensor(info.shape);
@@ -74,6 +86,9 @@ Tensor ModelLoader::load_tensor(const std::string& name) {
     
     file.seekg(info.offset);
     file.read(reinterpret_cast<char*>(tensor.data()), info.size);
+    if (!file) {
+        throw std::runtime_error("Failed to read tensor data: " + name);
+    }
     
     file.close();
     

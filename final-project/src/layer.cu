@@ -15,57 +15,137 @@ namespace tensor_ops {
 // ============================================================================
 // CUDA kernels
 // ============================================================================
+constexpr int BLOCK_MM = 32;  // Increased for better tiling performance
+constexpr int BLOCK_OPS = 256;
+constexpr int BLOCK_SFTMX = 1024;
+constexpr int BLOCK_RMS = 128;
 
-inline dim3 make_grid_2d(size_t x, size_t y, int tx = 16, int ty = 16) {
+inline dim3 make_grid_2d(size_t x, size_t y, int tx = 32, int ty = 32) {
     return dim3((x + tx - 1) / tx, (y + ty - 1) / ty);
 }
 
-__global__ void matmul_kernel(const float* A, const float* B, float* C,
-                              size_t m, size_t k, size_t n) {
-    size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t col = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row < m && col < n) {
-        float sum = 0.0f;
-        for (size_t p = 0; p < k; ++p) {
-            sum += A[row * k + p] * B[p * n + col];
+// Tiled Matrix multiply: C[m, n] = A[m, k] @ B[k, n]
+// Uses shared memory tiling for better performance
+__global__ void matmul_kernel(
+    const float* A, const float* B, float* C,
+    size_t m, size_t k, size_t n) {
+
+    __shared__ float A_tile[BLOCK_MM][BLOCK_MM];
+    __shared__ float B_tile[BLOCK_MM][BLOCK_MM];
+    
+    size_t row = blockIdx.y * BLOCK_MM + threadIdx.y;
+    size_t col = blockIdx.x * BLOCK_MM + threadIdx.x;
+    
+    float sum = 0.0f;
+    
+    // Loop over tiles
+    for (size_t t = 0; t < (k + BLOCK_MM - 1) / BLOCK_MM; ++t) {
+        // Load A tile
+        size_t a_col = t * BLOCK_MM + threadIdx.x;
+        if (row < m && a_col < k) {
+            A_tile[threadIdx.y][threadIdx.x] = A[row * k + a_col];
+        } else {
+            A_tile[threadIdx.y][threadIdx.x] = 0.0f;
         }
+        
+        // Load B tile
+        size_t b_row = t * BLOCK_MM + threadIdx.y;
+        if (b_row < k && col < n) {
+            B_tile[threadIdx.y][threadIdx.x] = B[b_row * n + col];
+        } else {
+            B_tile[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+        
+        __syncthreads();
+        
+        // Compute partial dot product
+        #pragma unroll
+        for (size_t p = 0; p < BLOCK_MM; ++p) {
+            sum += A_tile[threadIdx.y][p] * B_tile[p][threadIdx.x];
+        }
+        
+        __syncthreads();
+    }
+    
+    if (row < m && col < n) {
         C[row * n + col] = sum;
     }
 }
 
-__global__ void matmul_transpose_kernel(const float* A, const float* B, float* C,
-                                    size_t m, size_t k, size_t n) {
-    size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t col = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row < m && col < n) {
-        float sum = 0.0f;
-        for (size_t p = 0; p < k; ++p) {
-            sum += A[row * k + p] * B[col * k + p];
+// Tiled Matrix multiply: C[m, n] = A[m, k] @ B[n, k]^T
+// Uses shared memory tiling for better performance
+__global__ void matmul_transpose_kernel(
+    const float* A, const float* B, float* C,
+    size_t m, size_t k, size_t n) {
+
+    __shared__ float A_tile[BLOCK_MM][BLOCK_MM];
+    __shared__ float B_tile[BLOCK_MM][BLOCK_MM];
+    
+    size_t row = blockIdx.y * BLOCK_MM + threadIdx.y;
+    size_t col = blockIdx.x * BLOCK_MM + threadIdx.x;
+    
+    float sum = 0.0f;
+    
+    // Loop over tiles
+    for (size_t t = 0; t < (k + BLOCK_MM - 1) / BLOCK_MM; ++t) {
+        // Load A tile
+        size_t a_col = t * BLOCK_MM + threadIdx.x;
+        if (row < m && a_col < k) {
+            A_tile[threadIdx.y][threadIdx.x] = A[row * k + a_col];
+        } else {
+            A_tile[threadIdx.y][threadIdx.x] = 0.0f;
         }
+        
+        // Load B tile (transposed access: B[col][p])
+        size_t b_col = t * BLOCK_MM + threadIdx.y;
+        if (col < n && b_col < k) {
+            B_tile[threadIdx.y][threadIdx.x] = B[col * k + b_col];
+        } else {
+            B_tile[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+        
+        __syncthreads();
+        
+        // Compute partial dot product
+        // For A @ B^T: A[row][p] * B[col][p]
+        #pragma unroll
+        for (size_t p = 0; p < BLOCK_MM; ++p) {
+            sum += A_tile[threadIdx.y][p] * B_tile[p][threadIdx.x];
+        }
+        
+        __syncthreads();
+    }
+    
+    if (row < m && col < n) {
         C[row * n + col] = sum;
     }
 }
 
+// Add: C[n] = A[n] + B[n]
 __global__ void add_kernel(const float* A, const float* B, float* C, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) C[idx] = A[idx] + B[idx];
 }
 
+// Add scalar: C[n] = A[n] + b
 __global__ void add_scalar_kernel(const float* A, float b, float* C, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) C[idx] = A[idx] + b;
 }
 
+// Element-wise multiply: C[n] = A[n] * B[n]
 __global__ void mul_kernel(const float* A, const float* B, float* C, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) C[idx] = A[idx] * B[idx];
 }
 
+// Multiply by scalar: C[n] = A[n] * b
 __global__ void mul_scalar_kernel(const float* A, float b, float* C, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) C[idx] = A[idx] * b;
 }
 
+// Sigmoid activation: Y[n] = 1 / (1 + exp(-X[n]))
 __global__ void sigmoid_kernel(const float* X, float* Y, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
@@ -74,6 +154,7 @@ __global__ void sigmoid_kernel(const float* X, float* Y, size_t n) {
     }
 }
 
+// SiLU activation: Y[n] = X[n] / (1 + exp(-X[n]))
 __global__ void silu_kernel(const float* X, float* Y, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
@@ -82,24 +163,77 @@ __global__ void silu_kernel(const float* X, float* Y, size_t n) {
     }
 }
 
+// Softmax: Y[row, :] = exp(X[row, :] - max) / sum(exp(X[row, :] - max))
+// Optimized with warp-level parallelism
 __global__ void softmax_kernel(const float* X, float* Y, size_t inner) {
     size_t row = blockIdx.x;
     const float* x_row = X + row * inner;
     float* y_row = Y + row * inner;
-    float m = x_row[0];
-    for (size_t j = 1; j < inner; ++j) m = fmaxf(m, x_row[j]);
-    float sum = 0.0f;
-    for (size_t j = 0; j < inner; ++j) {
+    
+    // Warp-level reduction for max
+    float local_max = -INFINITY;
+    for (size_t j = threadIdx.x; j < inner; j += blockDim.x) {
+        local_max = fmaxf(local_max, x_row[j]);
+    }
+    // Warp shuffle reduction for max
+    for (int offset = warpSize/2; offset > 0; offset /= 2) {
+        local_max = fmaxf(local_max, __shfl_down_sync(0xffffffff, local_max, offset));
+    }
+    // Cross-warp reduction using shared memory
+    __shared__ float shared_max[32];  // max 32 warps
+    int lane = threadIdx.x % warpSize;
+    int wid = threadIdx.x / warpSize;
+    if (lane == 0) shared_max[wid] = local_max;
+    __syncthreads();
+    
+    // First warp does final reduction
+    if (wid == 0) {
+        local_max = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize) ? shared_max[lane] : -INFINITY;
+        for (int offset = warpSize/2; offset > 0; offset /= 2) {
+            local_max = fmaxf(local_max, __shfl_down_sync(0xffffffff, local_max, offset));
+        }
+        if (lane == 0) shared_max[0] = local_max;
+    }
+    __syncthreads();
+    float m = shared_max[0];
+    
+    // Compute exp and sum
+    float local_sum = 0.0f;
+    for (size_t j = threadIdx.x; j < inner; j += blockDim.x) {
         float e = expf(x_row[j] - m);
         y_row[j] = e;
-        sum += e;
+        local_sum += e;
     }
-    float inv = 1.0f / sum;
-    for (size_t j = 0; j < inner; ++j) y_row[j] *= inv;
+    
+    // Warp shuffle reduction for sum
+    for (int offset = warpSize/2; offset > 0; offset /= 2) {
+        local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
+    }
+    __shared__ float shared_sum[32];
+    if (lane == 0) shared_sum[wid] = local_sum;
+    __syncthreads();
+    
+    if (wid == 0) {
+        local_sum = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize) ? shared_sum[lane] : 0.0f;
+        for (int offset = warpSize/2; offset > 0; offset /= 2) {
+            local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
+        }
+        if (lane == 0) shared_sum[0] = local_sum;
+    }
+    __syncthreads();
+    float inv = 1.0f / shared_sum[0];
+    
+    // Normalize
+    for (size_t j = threadIdx.x; j < inner; j += blockDim.x) {
+        y_row[j] *= inv;
+    }
 }
 
-__global__ void rms_norm_kernel(const float* X, const float* W, float eps,
-                                float* Y, size_t hidden, size_t rows) {
+// RMS normalization: Y[row, :] = X[row, :] * W[:] / (sqrt(mean(X[row, :]^2) + eps))
+__global__ void rms_norm_kernel(
+    const float* X, const float* W, float eps,
+    float* Y, size_t hidden, size_t rows) {
+
     size_t row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row < rows) {
         const float* x = X + row * hidden;
@@ -111,8 +245,11 @@ __global__ void rms_norm_kernel(const float* X, const float* W, float eps,
     }
 }
 
-__global__ void rope_compute_kernel(float* cos_out, float* sin_out,
-                                    size_t head_dim, size_t max_seq, float theta) {
+// RoPE compute: cos_out, sin_out: (max_seq, head_dim)
+__global__ void rope_compute_kernel(
+    float* cos_out, float* sin_out,
+    size_t head_dim, size_t max_seq, float theta) {
+
     size_t pos = blockIdx.x * blockDim.x + threadIdx.x;
     if (pos >= max_seq) return;
     size_t half = head_dim / 2;
@@ -126,9 +263,11 @@ __global__ void rope_compute_kernel(float* cos_out, float* sin_out,
     }
 }
 
-__global__ void rope_apply_kernel(float* q, float* k, const float* cos, const float* sin,
-                                  size_t batch, size_t qh, size_t kh,
-                                  size_t seq_len, size_t head_dim) {
+// RoPE apply: (q, k)[b, h, s, d] = rotate((q, k)[b, h, s, d], cos[s, d], sin[s, d])
+__global__ void rope_apply_kernel(
+    float* q, float* k, const float* cos, const float* sin,
+    size_t batch, size_t qh, size_t kh, size_t seq_len, size_t head_dim) {
+
     size_t b = blockIdx.x;
     size_t h = blockIdx.y;
     if (b >= batch) return;
@@ -159,9 +298,11 @@ __global__ void rope_apply_kernel(float* q, float* k, const float* cos, const fl
     }
 }
 
-__global__ void repeat_kv_kernel(const float* x, float* y,
-                                 size_t batch, size_t kv_heads, size_t n_rep,
-                                 size_t seq_len, size_t head_dim) {
+// Repeat KV heads: y[b, kv_heads * n_rep, s, d] <- x[b, kv_heads, s, d]
+__global__ void repeat_kv_kernel(
+    const float* x, float* y, size_t batch, size_t kv_heads,
+    size_t n_rep, size_t seq_len, size_t head_dim) {
+
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     size_t total = batch * kv_heads * n_rep * seq_len * head_dim;
     if (idx >= total) return;
@@ -174,9 +315,12 @@ __global__ void repeat_kv_kernel(const float* x, float* y,
     y[idx] = x[x_idx];
 }
 
-__global__ void causal_conv1d_kernel(const float* x, const float* w, const float* bias,
-                                     float* y, size_t batch, size_t ch,
-                                     size_t seq, size_t ksz) {
+// Causal Conv1D
+// y[b, ch, s] = sum_{k=0}^{ksz-1} x[b, ch, s - (ksz -1) + k] * w[ch, 0, k] + bias[ch]
+__global__ void causal_conv1d_kernel(
+    const float* x, const float* w, const float* bias, float* y,
+    size_t batch, size_t ch, size_t seq, size_t ksz) {
+
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     size_t total = batch * ch * seq;
     if (idx >= total) return;
@@ -195,6 +339,7 @@ __global__ void causal_conv1d_kernel(const float* x, const float* w, const float
 }
 
 // Matrix operations
+
 void matmul(const Tensor& a, const Tensor& b, Tensor& c) {
     // a: (m, k), b: (k, n), c: (m, n)
     size_t m = a.size(0);
@@ -204,11 +349,12 @@ void matmul(const Tensor& a, const Tensor& b, Tensor& c) {
     a.to_device(-1);  // Use current device
     b.to_device(-1);
     c.to_device(-1);
-    dim3 block(16, 16);
+    dim3 block(BLOCK_MM, BLOCK_MM);
     dim3 grid = make_grid_2d(n, m, block.x, block.y);
     matmul_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
     CHECK_CUDA(cudaDeviceSynchronize());
-    c.sync_host_from_device();
+    c.mark_device_dirty();
+    c.to_host();
 }
 
 void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c) {
@@ -220,11 +366,12 @@ void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c) {
     a.to_device(-1);
     b.to_device(-1);
     c.to_device(-1);
-    dim3 block(16, 16);
+    dim3 block(BLOCK_MM, BLOCK_MM);
     dim3 grid = make_grid_2d(n, m, block.x, block.y);
     matmul_transpose_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
     CHECK_CUDA(cudaDeviceSynchronize());
-    c.sync_host_from_device();
+    c.mark_device_dirty();
+    c.to_host();
 }
 
 // Element-wise operations
@@ -234,11 +381,11 @@ void add(const Tensor& a, const Tensor& b, Tensor& c) {
     a.to_device(-1);
     b.to_device(-1);
     c.to_device(-1);
-    dim3 block(256);
+    dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     add_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), n);
     CHECK_CUDA(cudaDeviceSynchronize());
-    c.sync_host_from_device();
+    c.mark_device_dirty();
 }
 
 void add_scalar(const Tensor& a, float b, Tensor& c) {
@@ -246,11 +393,11 @@ void add_scalar(const Tensor& a, float b, Tensor& c) {
     if (c.size() == 0) c = Tensor(a.shape());
     a.to_device(-1);
     c.to_device(-1);
-    dim3 block(256);
+    dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     add_scalar_kernel<<<grid, block>>>(a.device_data(), b, c.device_data(), n);
     CHECK_CUDA(cudaDeviceSynchronize());
-    c.sync_host_from_device();
+    c.mark_device_dirty();
 }
 
 void mul(const Tensor& a, const Tensor& b, Tensor& c) {
@@ -259,11 +406,11 @@ void mul(const Tensor& a, const Tensor& b, Tensor& c) {
     a.to_device(-1);
     b.to_device(-1);
     c.to_device(-1);
-    dim3 block(256);
+    dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     mul_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), n);
     CHECK_CUDA(cudaDeviceSynchronize());
-    c.sync_host_from_device();
+    c.mark_device_dirty();
 }
 
 void mul_scalar(const Tensor& a, float b, Tensor& c) {
@@ -271,11 +418,11 @@ void mul_scalar(const Tensor& a, float b, Tensor& c) {
     if (c.size() == 0) c = Tensor(a.shape());
     a.to_device(-1);
     c.to_device(-1);
-    dim3 block(256);
+    dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     mul_scalar_kernel<<<grid, block>>>(a.device_data(), b, c.device_data(), n);
     CHECK_CUDA(cudaDeviceSynchronize());
-    c.sync_host_from_device();
+    c.mark_device_dirty();
 }
 
 // Activation functions
@@ -284,11 +431,11 @@ void sigmoid(const Tensor& x, Tensor& y) {
     if (y.size() == 0) y = Tensor(x.shape());
     x.to_device(-1);
     y.to_device(-1);
-    dim3 block(256);
+    dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     sigmoid_kernel<<<grid, block>>>(x.device_data(), y.device_data(), n);
     CHECK_CUDA(cudaDeviceSynchronize());
-    y.sync_host_from_device();
+    y.mark_device_dirty();
 }
 
 void silu(const Tensor& x, Tensor& y) {
@@ -296,11 +443,11 @@ void silu(const Tensor& x, Tensor& y) {
     if (y.size() == 0) y = Tensor(x.shape());
     x.to_device(-1);
     y.to_device(-1);
-    dim3 block(256);
+    dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     silu_kernel<<<grid, block>>>(x.device_data(), y.device_data(), n);
     CHECK_CUDA(cudaDeviceSynchronize());
-    y.sync_host_from_device();
+    y.mark_device_dirty();
 }
 
 void softmax(const Tensor& x, Tensor& y, int dim) {
@@ -313,11 +460,11 @@ void softmax(const Tensor& x, Tensor& y, int dim) {
     if (y.size() == 0) y = Tensor(x.shape());
     x.to_device(-1);
     y.to_device(-1);
-    dim3 block(inner_size >= 1024 ? 1024 : inner_size);
+    dim3 block(inner_size >= BLOCK_SFTMX ? BLOCK_SFTMX : inner_size);
     dim3 grid(outer_size);
     softmax_kernel<<<grid, block>>>(x.device_data(), y.device_data(), inner_size);
     CHECK_CUDA(cudaDeviceSynchronize());
-    y.sync_host_from_device();
+    y.mark_device_dirty();
 }
 
 // Normalization
@@ -331,12 +478,12 @@ void rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& y) {
     x.to_device(-1);
     weight.to_device(-1);
     y.to_device(-1);
-    dim3 block(128);
+    dim3 block(BLOCK_RMS);
     dim3 grid((outer_size + block.x - 1) / block.x);
     rms_norm_kernel<<<grid, block>>>(x.device_data(), weight.device_data(), eps,
                                      y.device_data(), hidden_size, outer_size);
     CHECK_CUDA(cudaDeviceSynchronize());
-    y.sync_host_from_device();
+    y.mark_device_dirty();
 }
 
 // RoPE operations
@@ -346,12 +493,12 @@ void compute_rope_embeddings(size_t head_dim, size_t max_seq_len, float theta,
     if (sin.size() == 0) sin = Tensor({max_seq_len, head_dim});
     cos.to_device(-1);
     sin.to_device(-1);
-    dim3 block(256);
+    dim3 block(BLOCK_OPS);
     dim3 grid((max_seq_len + block.x - 1) / block.x);
     rope_compute_kernel<<<grid, block>>>(cos.device_data(), sin.device_data(), head_dim, max_seq_len, theta);
     CHECK_CUDA(cudaDeviceSynchronize());
-    cos.sync_host_from_device();
-    sin.sync_host_from_device();
+    cos.mark_device_dirty();
+    sin.mark_device_dirty();
 }
 
 void apply_rotary_pos_emb(Tensor& q, Tensor& k, const Tensor& cos, const Tensor& sin) {
@@ -374,14 +521,14 @@ void apply_rotary_pos_emb(Tensor& q, Tensor& k, const Tensor& cos, const Tensor&
     size_t h_max = std::max(num_q_heads, num_kv_heads);
     dim3 grid(batch, h_max);
     dim3 block(seq_len);
-    if (block.x > 256) block.x = 256;
+    if (block.x > BLOCK_OPS) block.x = BLOCK_OPS;
     rope_apply_kernel<<<grid, block>>>(q.device_data(), k.device_data(),
                                        cos.device_data(), sin.device_data(),
                                        batch, num_q_heads, num_kv_heads,
                                        seq_len, head_dim);
     CHECK_CUDA(cudaDeviceSynchronize());
-    q.sync_host_from_device();
-    k.sync_host_from_device();
+    q.mark_device_dirty();
+    k.mark_device_dirty();
 }
 
 // Grouped Query Attention operations
@@ -394,12 +541,12 @@ void repeat_kv(const Tensor& x, size_t n_rep, Tensor& y) {
     x.to_device(-1);
     y.to_device(-1);
     size_t total = batch * num_kv_heads * n_rep * seq_len * head_dim;
-    dim3 block(256);
+    dim3 block(BLOCK_OPS);
     dim3 grid((total + block.x - 1) / block.x);
     repeat_kv_kernel<<<grid, block>>>(x.device_data(), y.device_data(),
                                       batch, num_kv_heads, n_rep, seq_len, head_dim);
     CHECK_CUDA(cudaDeviceSynchronize());
-    y.sync_host_from_device();
+    y.mark_device_dirty();
 }
 
 // Convolution operations
@@ -419,13 +566,13 @@ void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias, Te
     if (bias) bias->to_device(-1);
     y.to_device(-1);
     size_t total = batch * channels * seq_len;
-    dim3 block(256);
+    dim3 block(BLOCK_OPS);
     dim3 grid((total + block.x - 1) / block.x);
     causal_conv1d_kernel<<<grid, block>>>(x.device_data(), weight.device_data(),
                                           bias ? bias->device_data() : nullptr,
                                           y.device_data(), batch, channels, seq_len, kernel_size);
     CHECK_CUDA(cudaDeviceSynchronize());
-    y.sync_host_from_device();
+    y.mark_device_dirty();
 }
 
 } // namespace tensor_ops

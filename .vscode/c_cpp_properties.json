@@ -1,14 +1,15 @@
 {
     "configurations": [
         {
-            "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
                 "${workspaceFolder}/final-project/include",
-                "/usr/local/cuda-11.8/targets/x86_64-linux/include"
+                "/usr/local/cuda/include"
             ],
-            "defines": [],
-            "compilerPath": "/usr/bin/gcc",
+            "defines": [
+                "__CUDACC__"
+            ],
+            "compilerPath": "/usr/local/cuda/bin/nvcc",
             "cStandard": "c17",
             "cppStandard": "gnu++14",
             "intelliSenseMode": "linux-gcc-x64"

@@ -3,6 +3,9 @@
 *.d
 obj/
 
+# nsys profiles
+*.nsys-rep
+
 # Executable
 main
 

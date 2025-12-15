@@ -46,8 +46,10 @@ public:
     void forward(const Tensor& x, Tensor& y, Tensor& router_logits);
     
 private:
+    static constexpr int EXPERT_PARALLEL_GPUS = 4;  // Single-node, fixed 4 GPU layout
     Tensor gate_;  // router
     std::vector<MLP> experts_;
+    std::vector<int> expert_devices_;
     Tensor expert_bias_;  // optional
     
     void route_tokens(const Tensor& router_logits, std::vector<int>& top_k_indices,

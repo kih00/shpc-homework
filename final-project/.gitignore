@@ -17,6 +17,9 @@ __pycache__/
 .Python
 *.so
 
+# nsys report
+*.nsys-rep
+
 # IDE files
 .vscode/
 .idea/

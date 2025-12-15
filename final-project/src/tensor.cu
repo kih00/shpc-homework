@@ -15,18 +15,21 @@ extern std::unique_ptr<ModelLoader> g_model_loader;
 
 // Tensor constructors and destructors
 Tensor::Tensor() : size_(0), host_data_(nullptr), device_data_(nullptr),
-                   owns_host_(false), owns_device_(false), device_id_(0) {}
+                   owns_host_(false), owns_device_(false), device_id_(0),
+                   host_dirty_(false), device_dirty_(false) {}
 
 Tensor::Tensor(const std::vector<size_t>& shape) 
-    : shape_(shape), host_data_(nullptr), device_data_(nullptr),
-      owns_host_(true), owns_device_(false), device_id_(0) {
+        : shape_(shape), host_data_(nullptr), device_data_(nullptr),
+            owns_host_(true), owns_device_(false), device_id_(0),
+            host_dirty_(false), device_dirty_(false) {
     size_ = compute_size();
     allocate_host();
 }
 
 Tensor::Tensor(const std::vector<size_t>& shape, float* data, bool copy)
-    : shape_(shape), host_data_(nullptr), device_data_(nullptr),
-      owns_host_(copy), owns_device_(false), device_id_(0) {
+        : shape_(shape), host_data_(nullptr), device_data_(nullptr),
+            owns_host_(copy), owns_device_(false), device_id_(0),
+            host_dirty_(false), device_dirty_(false) {
     size_ = compute_size();
     if (copy) {
         allocate_host();
@@ -42,8 +45,9 @@ Tensor::~Tensor() {
 
 // Copy constructor
 Tensor::Tensor(const Tensor& other)
-    : shape_(other.shape_), size_(other.size_), host_data_(nullptr), device_data_(nullptr),
-      owns_host_(true), owns_device_(false), device_id_(other.device_id_) {
+        : shape_(other.shape_), size_(other.size_), host_data_(nullptr), device_data_(nullptr),
+            owns_host_(true), owns_device_(false), device_id_(other.device_id_),
+            host_dirty_(false), device_dirty_(false) {
     if (other.size_ > 0) {
         other.to_host();
         allocate_host();
@@ -60,6 +64,8 @@ Tensor& Tensor::operator=(const Tensor& other) {
         device_id_ = other.device_id_;
         owns_host_ = true;
         owns_device_ = false;
+        host_dirty_ = false;
+        device_dirty_ = false;
         if (other.size_ > 0) {
             other.to_host();
             allocate_host();
@@ -74,12 +80,15 @@ Tensor::Tensor(Tensor&& other) noexcept
         : shape_(std::move(other.shape_)), size_(other.size_),
             host_data_(other.host_data_), device_data_(other.device_data_),
             owns_host_(other.owns_host_), owns_device_(other.owns_device_),
-            device_id_(other.device_id_) {
+            device_id_(other.device_id_),
+            host_dirty_(other.host_dirty_), device_dirty_(other.device_dirty_) {
         other.host_data_ = nullptr;
         other.device_data_ = nullptr;
         other.size_ = 0;
         other.owns_host_ = false;
         other.owns_device_ = false;
+        other.host_dirty_ = false;
+        other.device_dirty_ = false;
 }
 
 // Move assignment
@@ -93,12 +102,16 @@ Tensor& Tensor::operator=(Tensor&& other) noexcept {
         owns_host_ = other.owns_host_;
         owns_device_ = other.owns_device_;
         device_id_ = other.device_id_;
+        host_dirty_ = other.host_dirty_;
+        device_dirty_ = other.device_dirty_;
         
         other.host_data_ = nullptr;
         other.device_data_ = nullptr;
         other.size_ = 0;
         other.owns_host_ = false;
         other.owns_device_ = false;
+        other.host_dirty_ = false;
+        other.device_dirty_ = false;
     }
     return *this;
 }
@@ -204,6 +217,8 @@ Tensor Tensor::view(const std::vector<size_t>& new_shape) const {
     result.device_data_ = device_data_;
     result.device_id_ = device_id_;
     result.owns_device_ = false;
+    result.device_dirty_ = device_dirty_;
+    result.host_dirty_ = host_dirty_;
     return result;
 }
 
@@ -304,12 +319,16 @@ void Tensor::ones() {
 
 void Tensor::ensure_host_data() const {
     if (size_ == 0) return;
+    // Allocate host buffer if missing
     if (host_data_ == nullptr) {
         host_data_ = new float[size_];
         owns_host_ = true;
-        if (device_data_ != nullptr) {
-            CHECK_CUDA(cudaMemcpy(host_data_, device_data_, size_ * sizeof(float), cudaMemcpyDeviceToHost));
-        }
+    }
+    // If device has fresher data, sync it back
+    if (device_data_ != nullptr && device_dirty_) {
+        CHECK_CUDA(cudaMemcpy(host_data_, device_data_, size_ * sizeof(float), cudaMemcpyDeviceToHost));
+        device_dirty_ = false;
+        host_dirty_ = false;
     }
 }
 
@@ -344,6 +363,8 @@ void Tensor::to_device(int device_id, cudaStream_t stream) const {
     ensure_host_data();
     CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
     CHECK_CUDA(cudaStreamSynchronize(stream));
+    host_dirty_ = false;
+    device_dirty_ = false;
 }
 
 void Tensor::to_host(cudaStream_t stream) const {
@@ -352,6 +373,8 @@ void Tensor::to_host(cudaStream_t stream) const {
     if (device_data_ != nullptr) {
         CHECK_CUDA(cudaMemcpyAsync(host_data_, device_data_, size_ * sizeof(float), cudaMemcpyDeviceToHost, stream));
         CHECK_CUDA(cudaStreamSynchronize(stream));
+        device_dirty_ = false;
+        host_dirty_ = false;
     }
 }
 
@@ -360,6 +383,8 @@ void Tensor::sync_device_from_host(cudaStream_t stream) const {
     ensure_host_data();
     CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
     CHECK_CUDA(cudaStreamSynchronize(stream));
+    host_dirty_ = false;
+    device_dirty_ = false;
 }
 
 void Tensor::sync_host_from_device(cudaStream_t stream) const {
@@ -367,6 +392,8 @@ void Tensor::sync_host_from_device(cudaStream_t stream) const {
     ensure_host_data();
     CHECK_CUDA(cudaMemcpyAsync(host_data_, device_data_, size_ * sizeof(float), cudaMemcpyDeviceToHost, stream));
     CHECK_CUDA(cudaStreamSynchronize(stream));
+    device_dirty_ = false;
+    host_dirty_ = false;
 }
 
 void Tensor::copy_to_device(int target_device, cudaStream_t stream) const {
@@ -375,23 +402,40 @@ void Tensor::copy_to_device(int target_device, cudaStream_t stream) const {
     // If already on target device, do nothing
     if (device_data_ != nullptr && device_id_ == target_device) return;
     
-    // Free old device data if on a different device
-    if (device_data_ != nullptr && owns_device_ && device_id_ != target_device) {
-        int old_device;
-        CHECK_CUDA(cudaGetDevice(&old_device));
-        CHECK_CUDA(cudaSetDevice(device_id_));
-        CHECK_CUDA(cudaFree(device_data_));
-        CHECK_CUDA(cudaSetDevice(old_device));
-        device_data_ = nullptr;
-        owns_device_ = false;
-    }
+    // Save old device data pointer and device id for device-to-device copy
+    float* old_device_data = device_data_;
+    int old_device_id = device_id_;
+    bool had_device_data = (device_data_ != nullptr);
     
-    // Allocate on target device and copy
+    // Allocate on target device
     device_id_ = target_device;
     CHECK_CUDA(cudaSetDevice(target_device));
     CHECK_CUDA(cudaMalloc(&device_data_, size_ * sizeof(float)));
+    
+    if (had_device_data) {
+        // Device-to-device copy (peer copy across GPUs)
+        CHECK_CUDA(cudaMemcpyAsync(device_data_, old_device_data, size_ * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+        
+        // Free old device data
+        if (owns_device_) {
+            CHECK_CUDA(cudaSetDevice(old_device_id));
+            CHECK_CUDA(cudaFree(old_device_data));
+            CHECK_CUDA(cudaSetDevice(target_device));
+        }
+    } else {
+        // Host to device copy
+        ensure_host_data();
+        CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+        host_dirty_ = false;
+        device_dirty_ = false;
+    }
+    // After a device-to-device copy, device has the freshest data and host is stale.
+    if (had_device_data) {
+        host_dirty_ = false;
+        device_dirty_ = true;
+    }
     owns_device_ = true;
-    ensure_host_data();
-    CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
 }
 

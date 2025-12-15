@@ -1,0 +1,67 @@
+
+=============================================
+ Model: LFM2-8B-A1B
+---------------------------------------------
+ Validation: ON
+ Warm-up: OFF
+ Number of samples: 4
+=============================================
+
+Initializing inputs and outputs...Done!
+Input file info:
+  Total samples: 1024
+  Sequence length: 16
+  Processing samples: 4
+
+Loading model from /mnt/ramdisk/model.bin...Loading LFM2-8B-A1B model from /mnt/ramdisk/model.bin
+Loading model index from /mnt/ramdisk/model.bin
+  Number of tensors: 2302
+  Index loaded successfully
+Loading embeddings...
+  Embeddings shape: 65536 x 2048
+Loading 24 decoder layers...
+  Layer 0: Conv
+  Layer 1: Conv
+  Layer 2: Attention
+  Layer 3: Conv
+  Layer 4: Conv
+  Layer 5: Conv
+  Layer 6: Attention
+  Layer 7: Conv
+  Layer 8: Conv
+  Layer 9: Conv
+  Layer 10: Attention
+  Layer 11: Conv
+  Layer 12: Conv
+  Layer 13: Conv
+  Layer 14: Attention
+  Layer 15: Conv
+  Layer 16: Conv
+  Layer 17: Conv
+  Layer 18: Attention
+  Layer 19: Conv
+  Layer 20: Conv
+  Layer 21: Attention
+  Layer 22: Conv
+  Layer 23: Conv
+Loading output layers...
+  Using tied weights for LM head
+Model loaded successfully!
+Generating...Done!
+Elapsed time: 18.486448 (sec)
+Throughput: 0.216375 (samples/sec)
+
+Saving outputs to data/outputs.bin...Done!
+===========================================================
+Validating against reference answers...
+===========================================================
+
+Comparing 4 samples...
+Threshold: 1e-3
+
+Top-1 Prediction Accuracy: 100% (4/4)
+VALID
+Generating '/tmp/nsys-report-cb4f.qdstrm'
+[1/1] [0%                          ] report4.nsys-rep[1/1] [0%                          ] report4.nsys-rep[1/1] [0%                          ] report4.nsys-rep[1/1] [5%                          ] report4.nsys-rep[1/1] [0%                          ] report4.nsys-rep[1/1] [7%                          ] report4.nsys-rep[1/1] [6%                          ] report4.nsys-rep[1/1] [5%                          ] report4.nsys-rep[1/1] [9%                          ] report4.nsys-rep[1/1] [8%                          ] report4.nsys-rep[1/1] [9%                          ] report4.nsys-rep[1/1] [8%                          ] report4.nsys-rep[1/1] [7%                          ] report4.nsys-rep[1/1] [6%                          ] report4.nsys-rep[1/1] [7%                          ] report4.nsys-rep[1/1] [8%                          ] report4.nsys-rep[1/1] [9%                          ] report4.nsys-rep[1/1] [10%                         ] report4.nsys-rep[1/1] [11%                         ] report4.nsys-rep[1/1] [12%                         ] report4.nsys-rep[1/1] [13%                         ] report4.nsys-rep[1/1] [14%                         ] report4.nsys-rep[1/1] [=17%                        ] report4.nsys-rep[1/1] [==18%                       ] report4.nsys-rep[1/1] [==20%                       ] report4.nsys-rep[1/1] [==21%                       ] report4.nsys-rep[1/1] [===23%                      ] report4.nsys-rep[1/1] [===24%                      ] report4.nsys-rep[1/1] [====27%                     ] report4.nsys-rep[1/1] [=====29%                    ] report4.nsys-rep[1/1] [=====32%                    ] report4.nsys-rep[1/1] [======35%                   ] report4.nsys-rep[1/1] [=======37%                  ] report4.nsys-rep[1/1] [========40%                 ] report4.nsys-rep[1/1] [=========43%                ] report4.nsys-rep[1/1] [=========45%                ] report4.nsys-rep[1/1] [==========48%               ] report4.nsys-rep[1/1] [===========50%              ] report4.nsys-rep[1/1] [===========53%              ] report4.nsys-rep[1/1] [============56%             ] report4.nsys-rep[1/1] [=============59%            ] report4.nsys-rep[1/1] [==============61%           ] report4.nsys-rep[1/1] [==============64%           ] report4.nsys-rep[1/1] [===============66%          ] report4.nsys-rep[1/1] [================69%         ] report4.nsys-rep[1/1] [=================72%        ] report4.nsys-rep[1/1] [=================74%        ] report4.nsys-rep[1/1] [==================77%       ] report4.nsys-rep[1/1] [===================79%      ] report4.nsys-rep[1/1] [===================82%      ] report4.nsys-rep[1/1] [====================83%     ] report4.nsys-rep[1/1] [========================100%] report4.nsys-rep[1/1] [========================100%] report4.nsys-rep
+Generated:
+    /home/s2/shpc028/shpc-homework/final-project/report4.nsys-rep

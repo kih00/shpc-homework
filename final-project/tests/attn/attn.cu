@@ -47,13 +47,13 @@ __global__ void matmul_transposed_kernel(
     float sum = 0.0f;
     int tiles = (k + BLOCK_MM - 1) / BLOCK_MM;
     for (int t = 0; t < tiles; ++t) {
-        int a_k = t * BLOCK_MM + threadIdx.x;
+        int x_k = t * BLOCK_MM + threadIdx.x;
         int w_k = t * BLOCK_MM + threadIdx.y;
 
         x_tile[threadIdx.y][threadIdx.x] = 0.0f;
         w_tile[threadIdx.y][threadIdx.x] = 0.0f;
-        if (row < m && a_k < k)
-            x_tile[threadIdx.y][threadIdx.x] = x[row * k + a_k];
+        if (row < m && x_k < k)
+            x_tile[threadIdx.y][threadIdx.x] = x[row * k + x_k];
         if (col < n && w_k < k)
             w_tile[threadIdx.y][threadIdx.x] = w[col * k + w_k];
         __syncthreads();
