@@ -72,51 +72,112 @@ __global__ void matmul_kernel(
 }
 
 // Tiled Matrix multiply: C[m, n] = A[m, k] @ B[n, k]^T
-// Uses shared memory tiling for better performance
+// Optimized with register tiling (BM=64, BN=64, BK=32, TM=4, TN=4)
 __global__ void matmul_transpose_kernel(
-    const float* A, const float* B, float* C,
+    const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C,
     size_t m, size_t k, size_t n) {
 
-    __shared__ float A_tile[BLOCK_MM][BLOCK_MM];
-    __shared__ float B_tile[BLOCK_MM][BLOCK_MM];
-    
-    size_t row = blockIdx.y * BLOCK_MM + threadIdx.y;
-    size_t col = blockIdx.x * BLOCK_MM + threadIdx.x;
-    
-    float sum = 0.0f;
-    
-    // Loop over tiles
-    for (size_t t = 0; t < (k + BLOCK_MM - 1) / BLOCK_MM; ++t) {
-        // Load A tile
-        size_t a_col = t * BLOCK_MM + threadIdx.x;
-        if (row < m && a_col < k) {
-            A_tile[threadIdx.y][threadIdx.x] = A[row * k + a_col];
+    const int BM = 64;
+    const int BN = 64;
+    const int BK = 32;
+    const int TM = 4;
+    const int TN = 4;
+
+    __shared__ float As[BM][BK + 1];
+    __shared__ float Bs[BN][BK + 1];
+
+    int tid = threadIdx.x;
+    int ty = tid / 16; // 0..15
+    int tx = tid % 16; // 0..15
+
+    float thread_results[TM][TN] = {0.0f};
+    float reg_a[TM];
+    float reg_b[TN];
+
+    size_t a_row_start = blockIdx.y * BM;
+    size_t b_row_start = blockIdx.x * BN;
+
+    const float* A_ptr = A + a_row_start * k;
+    const float* B_ptr = B + b_row_start * k;
+
+    for (size_t k_idx = 0; k_idx < k; k_idx += BK) {
+        // Load A and B tiles using float4
+        int t_row = tid / 8;
+        int t_col = (tid % 8) * 4;
+
+        // Load A (2 rows per thread)
+        if (t_row < BM && (a_row_start + t_row) < m) {
+             float4 v = reinterpret_cast<const float4*>(&A_ptr[t_row * k + k_idx + t_col])[0];
+             As[t_row][t_col] = v.x; As[t_row][t_col+1] = v.y;
+             As[t_row][t_col+2] = v.z; As[t_row][t_col+3] = v.w;
         } else {
-            A_tile[threadIdx.y][threadIdx.x] = 0.0f;
+             As[t_row][t_col] = 0.0f; As[t_row][t_col+1] = 0.0f;
+             As[t_row][t_col+2] = 0.0f; As[t_row][t_col+3] = 0.0f;
         }
         
-        // Load B tile (transposed access: B[col][p])
-        size_t b_col = t * BLOCK_MM + threadIdx.y;
-        if (col < n && b_col < k) {
-            B_tile[threadIdx.y][threadIdx.x] = B[col * k + b_col];
+        int t_row2 = t_row + 32;
+        if (t_row2 < BM && (a_row_start + t_row2) < m) {
+             float4 v = reinterpret_cast<const float4*>(&A_ptr[t_row2 * k + k_idx + t_col])[0];
+             As[t_row2][t_col] = v.x; As[t_row2][t_col+1] = v.y;
+             As[t_row2][t_col+2] = v.z; As[t_row2][t_col+3] = v.w;
         } else {
-            B_tile[threadIdx.y][threadIdx.x] = 0.0f;
+             As[t_row2][t_col] = 0.0f; As[t_row2][t_col+1] = 0.0f;
+             As[t_row2][t_col+2] = 0.0f; As[t_row2][t_col+3] = 0.0f;
+        }
+
+        // Load B (2 rows per thread)
+        if (t_row < BN && (b_row_start + t_row) < n) {
+             float4 v = reinterpret_cast<const float4*>(&B_ptr[t_row * k + k_idx + t_col])[0];
+             Bs[t_row][t_col] = v.x; Bs[t_row][t_col+1] = v.y;
+             Bs[t_row][t_col+2] = v.z; Bs[t_row][t_col+3] = v.w;
+        } else {
+             Bs[t_row][t_col] = 0.0f; Bs[t_row][t_col+1] = 0.0f;
+             Bs[t_row][t_col+2] = 0.0f; Bs[t_row][t_col+3] = 0.0f;
+        }
+        
+        int t_row2_b = t_row + 32;
+        if (t_row2_b < BN && (b_row_start + t_row2_b) < n) {
+             float4 v = reinterpret_cast<const float4*>(&B_ptr[t_row2_b * k + k_idx + t_col])[0];
+             Bs[t_row2_b][t_col] = v.x; Bs[t_row2_b][t_col+1] = v.y;
+             Bs[t_row2_b][t_col+2] = v.z; Bs[t_row2_b][t_col+3] = v.w;
+        } else {
+             Bs[t_row2_b][t_col] = 0.0f; Bs[t_row2_b][t_col+1] = 0.0f;
+             Bs[t_row2_b][t_col+2] = 0.0f; Bs[t_row2_b][t_col+3] = 0.0f;
         }
         
         __syncthreads();
         
-        // Compute partial dot product
-        // For A @ B^T: A[row][p] * B[col][p]
+        // Compute
         #pragma unroll
-        for (size_t p = 0; p < BLOCK_MM; ++p) {
-            sum += A_tile[threadIdx.y][p] * B_tile[p][threadIdx.x];
+        for (int i = 0; i < BK; ++i) {
+            #pragma unroll
+            for (int r = 0; r < TM; ++r) reg_a[r] = As[ty * TM + r][i];
+            #pragma unroll
+            for (int c = 0; c < TN; ++c) reg_b[c] = Bs[tx * TN + c][i];
+            
+            #pragma unroll
+            for (int r = 0; r < TM; ++r) {
+                #pragma unroll
+                for (int c = 0; c < TN; ++c) {
+                    thread_results[r][c] += reg_a[r] * reg_b[c];
+                }
+            }
         }
         
         __syncthreads();
     }
     
-    if (row < m && col < n) {
-        C[row * n + col] = sum;
+    // Store
+    #pragma unroll
+    for (int r = 0; r < TM; ++r) {
+        #pragma unroll
+        for (int c = 0; c < TN; ++c) {
+            int row = a_row_start + ty * TM + r;
+            int col = b_row_start + tx * TN + c;
+            if (row < m && col < n) {
+                C[row * n + col] = thread_results[r][c];
+            }
+        }
     }
 }
 
@@ -584,8 +645,11 @@ void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t
     a.to_device(-1, stream);
     b.to_device(-1, stream);
     c.to_device(-1, stream);
-    dim3 block(BLOCK_MM, BLOCK_MM);
-    dim3 grid = make_grid_2d(n, m, block.x, block.y);
+    
+    // Optimized kernel launch config
+    dim3 block(256);
+    dim3 grid((n + 63) / 64, (m + 63) / 64);
+    
     matmul_transpose_kernel<<<grid, block, 0, stream>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
     // No sync needed - same stream executes sequentially
     c.mark_device_dirty();
