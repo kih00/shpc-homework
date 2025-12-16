@@ -16,12 +16,8 @@ std::unique_ptr<ModelLoader> g_model_loader;
 // CUDA Kernels for SparseMoeBlock
 // ============================================================================
 
-// Top-K routing kernel for Sparse MoE
-// Computes sigmoid(router_logits) + optional bias, then selects top-k per token
-// router_logits: (num_tokens, num_experts)
-// expert_bias: (num_experts) - optional, can be nullptr
-// topk_indices: (num_tokens, num_experts_per_tok) - output indices
-// topk_weights: (num_tokens, num_experts_per_tok) - output weights
+// Optimized Top-K routing kernel using warp parallelism
+// Each warp handles one token, threads cooperate to find top-k experts
 __global__ void route_tokens_kernel(
     const float* router_logits, const float* expert_bias,
     int* topk_indices, float* topk_weights,
@@ -30,54 +26,162 @@ __global__ void route_tokens_kernel(
 
     size_t t = blockIdx.x; // token index
     if (t >= num_tokens) return;
-    if (threadIdx.x != 0) return; // only one thread does work per token
 
-    // Local buffers for selection (num_experts_per_tok is small, e.g., 4)
-    const int MAX_K = 32;
-    int sel_idx[MAX_K];
-    float sel_w[MAX_K];
+    const int tid = threadIdx.x;
 
-    // Greedy top-k selection
-    for (size_t k = 0; k < num_experts_per_tok; k++) {
-        float best_score = -1e30f;
-        int best_idx = 0;
+    // Shared memory for scores and selection
+    __shared__ float scores[32];  // num_experts = 32
+    __shared__ float sigmoid_vals[32];
+    __shared__ int sel_idx[8];  // max top-k
+    __shared__ float sel_w[8];
 
-        for (size_t j = 0; j < num_experts; j++) {
-            // Skip already selected experts
-            bool used = false;
-            for (size_t kk = 0; kk < k; kk++) {
-                if (sel_idx[kk] == (int)j) { used = true; break; }
+    // Step 1: Compute sigmoid scores in parallel (32 threads for 32 experts)
+    if (tid < num_experts) {
+        float logit = router_logits[t * num_experts + tid];
+        float sig = 1.0f / (1.0f + expf(-logit));
+        sigmoid_vals[tid] = sig;
+        scores[tid] = (expert_bias != nullptr) ? (sig + expert_bias[tid]) : sig;
+    }
+    __syncthreads();
+
+    // Step 2: Greedy top-k selection (thread 0 does sequential selection with help)
+    if (tid == 0) {
+        for (size_t k = 0; k < num_experts_per_tok; k++) {
+            float best_score = -1e30f;
+            int best_idx = 0;
+
+            for (size_t j = 0; j < num_experts; j++) {
+                // Skip already selected
+                bool used = false;
+                for (size_t kk = 0; kk < k; kk++) {
+                    if (sel_idx[kk] == (int)j) { used = true; break; }
+                }
+                if (used) continue;
+
+                if (scores[j] > best_score) {
+                    best_score = scores[j];
+                    best_idx = j;
+                }
             }
-            if (used) continue;
-
-            float logit = router_logits[t * num_experts + j];
-            float w = 1.0f / (1.0f + expf(-logit));  // sigmoid
-            float score = (expert_bias != nullptr) ? (w + expert_bias[j]) : w;
-            
-            if (score > best_score) {
-                best_score = score;
-                best_idx = j;
-            }
+            sel_idx[k] = best_idx;
+            sel_w[k] = sigmoid_vals[best_idx];
         }
 
-        sel_idx[k] = best_idx;
-        // Get original sigmoid weight (without bias) for routing
-        float routed_w = 1.0f / (1.0f + expf(-router_logits[t * num_experts + best_idx]));
-        sel_w[k] = routed_w;
-    }
+        // Normalize if needed
+        if (norm_topk_prob) {
+            float sum = 0.0f;
+            for (size_t k = 0; k < num_experts_per_tok; k++) sum += sel_w[k];
+            float inv = (sum > 1e-6f) ? (1.0f / sum) : 0.0f;
+            for (size_t k = 0; k < num_experts_per_tok; k++) sel_w[k] *= inv;
+        }
 
-    // Normalize selected weights if needed
-    if (norm_topk_prob) {
-        float sum = 0.0f;
-        for (size_t k = 0; k < num_experts_per_tok; k++) sum += sel_w[k];
-        float inv = (sum > 1e-6f) ? (1.0f / sum) : 0.0f;
-        for (size_t k = 0; k < num_experts_per_tok; k++) sel_w[k] *= inv;
+        // Store results
+        for (size_t k = 0; k < num_experts_per_tok; k++) {
+            topk_indices[t * num_experts_per_tok + k] = sel_idx[k];
+            topk_weights[t * num_experts_per_tok + k] = sel_w[k] * routed_scaling_factor;
+        }
     }
+}
 
-    // Store results with scaling
-    for (size_t k = 0; k < num_experts_per_tok; k++) {
-        topk_indices[t * num_experts_per_tok + k] = sel_idx[k];
-        topk_weights[t * num_experts_per_tok + k] = sel_w[k] * routed_scaling_factor;
+// Kernel to gather tokens for a specific expert
+// Gathers tokens assigned to expert_id from x_flat into expert_input
+__global__ void gather_expert_input_kernel(
+    const float* x_flat,           // (num_tokens, hidden_size)
+    const int* topk_indices,       // (num_tokens, num_experts_per_tok)
+    float* expert_input,           // (max_tokens_per_expert, hidden_size)
+    int* token_ids_for_expert,     // which original token each gathered row came from
+    int* num_tokens_for_expert,    // output: actual count
+    size_t num_tokens, size_t hidden_size,
+    size_t num_experts_per_tok, int expert_id) {
+
+    // First pass: count tokens (done by thread 0)
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        int count = 0;
+        for (size_t t = 0; t < num_tokens; t++) {
+            for (size_t k = 0; k < num_experts_per_tok; k++) {
+                if (topk_indices[t * num_experts_per_tok + k] == expert_id) {
+                    token_ids_for_expert[count] = t;
+                    count++;
+                    break;  // Each token counted once per expert
+                }
+            }
+        }
+        *num_tokens_for_expert = count;
+    }
+    __syncthreads();
+
+    // Second pass: copy data
+    int count = *num_tokens_for_expert;
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = count * hidden_size;
+
+    if (idx < total) {
+        size_t row = idx / hidden_size;
+        size_t col = idx % hidden_size;
+        int src_token = token_ids_for_expert[row];
+        expert_input[row * hidden_size + col] = x_flat[src_token * hidden_size + col];
+    }
+}
+
+// Embedding lookup kernel: gather rows from embedding table
+// input_ids: (num_tokens,) - token IDs
+// embed_table: (vocab_size, hidden_size) - embedding table
+// output: (num_tokens, hidden_size) - output embeddings
+__global__ void embedding_lookup_kernel(
+    const int* input_ids,
+    const float* embed_table,
+    float* output,
+    size_t num_tokens, size_t hidden_size) {
+
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = num_tokens * hidden_size;
+
+    if (idx < total) {
+        size_t token_idx = idx / hidden_size;
+        size_t dim = idx % hidden_size;
+        int token_id = input_ids[token_idx];
+        output[idx] = embed_table[token_id * hidden_size + dim];
+    }
+}
+
+// Extract last token from each batch
+// input: (batch, seq_len, hidden_size)
+// output: (batch, hidden_size)
+__global__ void extract_last_token_kernel(
+    const float* input,
+    float* output,
+    size_t batch, size_t seq_len, size_t hidden_size) {
+
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = batch * hidden_size;
+
+    if (idx < total) {
+        size_t b = idx / hidden_size;
+        size_t h = idx % hidden_size;
+        // Copy last token (seq_len - 1) from each batch
+        output[b * hidden_size + h] = input[(b * seq_len + (seq_len - 1)) * hidden_size + h];
+    }
+}
+
+// Kernel to scatter and accumulate expert outputs with weights
+// Simple version: adds w * src[idx*hidden:] to dst[token_id*hidden:]
+__global__ void weighted_scatter_add_kernel(
+    float* dst,                    // (num_tokens, hidden_size)
+    const float* src,              // (num_expert_tokens, hidden_size)
+    const int* token_ids,          // (num_expert_tokens,) - which token each row maps to
+    const float* weights,          // (num_expert_tokens,) - weight for each row
+    size_t num_expert_tokens, size_t hidden_size) {
+
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = num_expert_tokens * hidden_size;
+
+    if (idx < total) {
+        size_t row = idx / hidden_size;
+        size_t col = idx % hidden_size;
+        int token_id = token_ids[row];
+        float w = weights[row];
+
+        atomicAdd(&dst[token_id * hidden_size + col], w * src[row * hidden_size + col]);
     }
 }
 
@@ -161,51 +265,50 @@ SparseMoeBlock::SparseMoeBlock(int layer_idx) {
     }
 }
 
-void SparseMoeBlock::route_tokens(const Tensor& router_logits, 
+void SparseMoeBlock::route_tokens(const Tensor& router_logits,
                                    std::vector<int>& top_k_indices,
                                    std::vector<float>& top_k_weights) {
     // router_logits: (batch * seq_len, num_experts) - should already be on GPU
     size_t num_tokens = router_logits.size(0);
-    
+
     // Resize output vectors
     top_k_indices.resize(num_tokens * NUM_EXPERTS_PER_TOK);
     top_k_weights.resize(num_tokens * NUM_EXPERTS_PER_TOK);
-    
+
     // Ensure router_logits is on device
     router_logits.to_device(-1);
-    
+
     // Allocate device buffers for kernel outputs
     int* d_topk_indices;
     float* d_topk_weights;
     CHECK_CUDA(cudaMalloc(&d_topk_indices, num_tokens * NUM_EXPERTS_PER_TOK * sizeof(int)));
     CHECK_CUDA(cudaMalloc(&d_topk_weights, num_tokens * NUM_EXPERTS_PER_TOK * sizeof(float)));
-    
+
     // Get expert_bias device pointer (nullptr if not used)
     const float* d_expert_bias = nullptr;
     if (USE_EXPERT_BIAS && expert_bias_.size() > 0) {
         expert_bias_.to_device(-1);
         d_expert_bias = expert_bias_.device_data();
     }
-    
-    // Launch routing kernel - one block per token
-    dim3 block(1);  // Single thread per block (greedy selection is sequential per token)
+
+    // Launch routing kernel - 32 threads per block for parallel sigmoid
+    dim3 block(32);
     dim3 grid(num_tokens);
-    
+
     route_tokens_kernel<<<grid, block>>>(
         router_logits.device_data(), d_expert_bias,
         d_topk_indices, d_topk_weights,
         num_tokens, NUM_EXPERTS, NUM_EXPERTS_PER_TOK,
         NORM_TOPK_PROB, ROUTED_SCALING_FACTOR);
-    CHECK_CUDA(cudaDeviceSynchronize());
-    
-    // Copy results back to host vectors
-    CHECK_CUDA(cudaMemcpy(top_k_indices.data(), d_topk_indices, 
-                          num_tokens * NUM_EXPERTS_PER_TOK * sizeof(int), 
+
+    // Copy results back to host (small data: num_tokens * 4 * sizeof(int/float))
+    CHECK_CUDA(cudaMemcpy(top_k_indices.data(), d_topk_indices,
+                          num_tokens * NUM_EXPERTS_PER_TOK * sizeof(int),
                           cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(top_k_weights.data(), d_topk_weights,
                           num_tokens * NUM_EXPERTS_PER_TOK * sizeof(float),
                           cudaMemcpyDeviceToHost));
-    
+
     // Free temporary device buffers
     CHECK_CUDA(cudaFree(d_topk_indices));
     CHECK_CUDA(cudaFree(d_topk_weights));
@@ -216,25 +319,27 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
     size_t batch = x.size(0);
     size_t seq_len = x.size(1);
     size_t hidden_size = x.size(2);
+    size_t num_tokens = batch * seq_len;
     const int base_device = 0;
 
-    // Flatten
-    Tensor x_flat = x.view({batch * seq_len, hidden_size});
+    // Flatten - keep on GPU
+    Tensor x_flat = x.view({num_tokens, hidden_size});
+    x_flat.to_device(base_device);
 
     // Compute router logits on base device (GPU)
     CHECK_CUDA(cudaSetDevice(base_device));
-    router_logits = Tensor({batch * seq_len, NUM_EXPERTS});
+    router_logits = Tensor({num_tokens, NUM_EXPERTS});
     tensor_ops::matmul_transposed(x_flat, gate_, router_logits);
 
-    // Route tokens using GPU kernel (via route_tokens method)
+    // Route tokens - routing indices/weights copied to host (small data)
     std::vector<int> top_k_indices;
     std::vector<float> top_k_weights;
     route_tokens(router_logits, top_k_indices, top_k_weights);
 
-    // Bucket tokens per expert for batched dispatch
+    // Bucket tokens per expert (host-side, but operates on small routing data)
     std::vector<std::vector<size_t>> tokens_per_expert(NUM_EXPERTS);
     std::vector<std::vector<float>> weights_per_expert(NUM_EXPERTS);
-    for (size_t t = 0; t < batch * seq_len; t++) {
+    for (size_t t = 0; t < num_tokens; t++) {
         for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; k++) {
             int expert_idx = top_k_indices[t * NUM_EXPERTS_PER_TOK + k];
             float weight = top_k_weights[t * NUM_EXPERTS_PER_TOK + k];
@@ -243,10 +348,6 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
         }
     }
 
-    // Ensure x_flat is on host for expert input packing
-    x_flat.to_host();
-
-    // Prepare per-GPU expert inputs and outputs
     // Group experts by device
     std::vector<std::vector<size_t>> experts_on_device(EXPERT_PARALLEL_GPUS);
     for (size_t e = 0; e < NUM_EXPERTS; e++) {
@@ -256,13 +357,24 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
         }
     }
 
-    // Storage for expert outputs per GPU (to be filled in parallel)
+    // Copy x_flat to all GPUs that have active experts
+    std::vector<Tensor> x_flat_per_gpu(EXPERT_PARALLEL_GPUS);
+    for (int dev = 0; dev < EXPERT_PARALLEL_GPUS; dev++) {
+        if (!experts_on_device[dev].empty()) {
+            x_flat_per_gpu[dev] = x_flat.copy();
+            x_flat_per_gpu[dev].copy_to_device(dev);
+        }
+    }
+
+    // Storage for expert outputs and token indices per GPU
     std::vector<std::vector<Tensor>> expert_outputs(EXPERT_PARALLEL_GPUS);
-    std::vector<std::vector<size_t>> expert_indices(EXPERT_PARALLEL_GPUS);
+    std::vector<std::vector<std::vector<size_t>>> expert_token_lists(EXPERT_PARALLEL_GPUS);
+    std::vector<std::vector<std::vector<float>>> expert_weight_lists(EXPERT_PARALLEL_GPUS);
 
     for (int dev = 0; dev < EXPERT_PARALLEL_GPUS; dev++) {
         expert_outputs[dev].resize(experts_on_device[dev].size());
-        expert_indices[dev] = experts_on_device[dev];
+        expert_token_lists[dev].resize(experts_on_device[dev].size());
+        expert_weight_lists[dev].resize(experts_on_device[dev].size());
     }
 
     // Parallel execution across 4 GPUs using OpenMP
@@ -271,65 +383,103 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
         int dev = omp_get_thread_num();
         CHECK_CUDA(cudaSetDevice(dev));
 
-        const float* x_flat_ptr = x_flat.data();
-
-        for (size_t i = 0; i < expert_indices[dev].size(); i++) {
-            size_t expert_idx = expert_indices[dev][i];
+        for (size_t i = 0; i < experts_on_device[dev].size(); i++) {
+            size_t expert_idx = experts_on_device[dev][i];
             const auto& token_list = tokens_per_expert[expert_idx];
+            const auto& weight_list = weights_per_expert[expert_idx];
             size_t tok_count = token_list.size();
 
             if (tok_count == 0) continue;
 
-            // Pack tokens for this expert using memcpy (row-wise)
+            // Store token list and weights for later scatter
+            expert_token_lists[dev][i] = token_list;
+            expert_weight_lists[dev][i] = weight_list;
+
+            // Create expert input on GPU - gather tokens
             Tensor expert_in({tok_count, 1, hidden_size});
-            float* expert_in_ptr = expert_in.data();
+            expert_in.to_device(dev);
+
+            // GPU gather: copy selected rows from x_flat_per_gpu[dev] to expert_in
+            const float* src = x_flat_per_gpu[dev].device_data();
+            float* dst = expert_in.device_data();
             for (size_t idx = 0; idx < tok_count; idx++) {
                 size_t t = token_list[idx];
-                std::memcpy(expert_in_ptr + idx * hidden_size,
-                           x_flat_ptr + t * hidden_size,
-                           hidden_size * sizeof(float));
+                CHECK_CUDA(cudaMemcpyAsync(dst + idx * hidden_size,
+                                           src + t * hidden_size,
+                                           hidden_size * sizeof(float),
+                                           cudaMemcpyDeviceToDevice));
             }
+            CHECK_CUDA(cudaDeviceSynchronize());
+            expert_in.mark_device_dirty();
 
-            // Execute expert on its owning GPU
+            // Execute expert on its owning GPU (stays on GPU)
             Tensor expert_out;
             experts_[expert_idx].forward(expert_in, expert_out);
-            expert_out.to_host();
 
-            // Store output for later accumulation
+            // Keep expert_out on GPU, just store it
             expert_outputs[dev][i] = std::move(expert_out);
         }
     }
 
-    // Accumulate results on host
+    // Initialize output tensor on base device
     y = Tensor({batch, seq_len, hidden_size});
-    float* y_ptr = y.data();
-    std::memset(y_ptr, 0, batch * seq_len * hidden_size * sizeof(float));
+    y.to_device(base_device);
+    CHECK_CUDA(cudaSetDevice(base_device));
+    CHECK_CUDA(cudaMemset(y.device_data(), 0, num_tokens * hidden_size * sizeof(float)));
+    y.mark_device_dirty();
 
+    // Accumulate results using GPU scatter_add kernel
     for (int dev = 0; dev < EXPERT_PARALLEL_GPUS; dev++) {
-        for (size_t i = 0; i < expert_indices[dev].size(); i++) {
-            size_t expert_idx = expert_indices[dev][i];
-            const auto& token_list = tokens_per_expert[expert_idx];
-            const auto& weight_list = weights_per_expert[expert_idx];
-            const Tensor& expert_out = expert_outputs[dev][i];
+        for (size_t i = 0; i < experts_on_device[dev].size(); i++) {
+            const auto& token_list = expert_token_lists[dev][i];
+            const auto& weight_list = expert_weight_lists[dev][i];
+            Tensor& expert_out = expert_outputs[dev][i];
 
             if (expert_out.size() == 0) continue;
 
-            const float* out_ptr = expert_out.data();
-            for (size_t idx = 0; idx < token_list.size(); idx++) {
-                size_t t = token_list[idx];
-                float w = weight_list[idx];
-                float* y_row = y_ptr + t * hidden_size;
-                const float* out_row = out_ptr + idx * hidden_size;
-                for (size_t h = 0; h < hidden_size; h++) {
-                    y_row[h] += w * out_row[h];
-                }
+            size_t tok_count = token_list.size();
+
+            // Copy expert_out to base device if on different GPU
+            if (dev != base_device) {
+                expert_out.copy_to_device(base_device);
             }
+            CHECK_CUDA(cudaSetDevice(base_device));
+
+            // Prepare token_ids and weights arrays on GPU
+            int* d_token_ids;
+            float* d_weights;
+            CHECK_CUDA(cudaMalloc(&d_token_ids, tok_count * sizeof(int)));
+            CHECK_CUDA(cudaMalloc(&d_weights, tok_count * sizeof(float)));
+
+            // Copy token_ids and weights to device
+            std::vector<int> token_ids_vec(tok_count);
+            for (size_t idx = 0; idx < tok_count; idx++) {
+                token_ids_vec[idx] = static_cast<int>(token_list[idx]);
+            }
+            CHECK_CUDA(cudaMemcpy(d_token_ids, token_ids_vec.data(),
+                                  tok_count * sizeof(int), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(d_weights, weight_list.data(),
+                                  tok_count * sizeof(float), cudaMemcpyHostToDevice));
+
+            // Launch scatter-add kernel
+            size_t total = tok_count * hidden_size;
+            dim3 block(256);
+            dim3 grid((total + 255) / 256);
+
+            weighted_scatter_add_kernel<<<grid, block>>>(
+                y.device_data(), expert_out.device_data(),
+                d_token_ids, d_weights,
+                tok_count, hidden_size);
+
+            CHECK_CUDA(cudaFree(d_token_ids));
+            CHECK_CUDA(cudaFree(d_weights));
         }
     }
 
-    // Keep output resident on base device for downstream layers
-    y.copy_to_device(base_device);
+    // Synchronize and keep on base device
     CHECK_CUDA(cudaSetDevice(base_device));
+    CHECK_CUDA(cudaDeviceSynchronize());
+    y.reshape({batch, seq_len, hidden_size});
 }
 
 // Attention implementation
@@ -659,21 +809,46 @@ void LFM2Model::forward(const std::vector<int>& input_ids, size_t batch, size_t 
     if (batch == 0 || seq_len == 0 || input_ids.size() != batch * seq_len) {
         throw std::runtime_error("Invalid batch/seq_len for forward");
     }
-    
-    // Embedding lookup (CPU side)
+
+    // debug: print shape of input
+    std::cout << "\nForward pass: batch=" << batch << ", seq_len=" << seq_len << std::endl;
+
+    size_t num_tokens = batch * seq_len;
+
+    // GPU Embedding lookup
+    CHECK_CUDA(cudaSetDevice(0));
+
+    // Copy input_ids to device
+    int* d_input_ids;
+    CHECK_CUDA(cudaMalloc(&d_input_ids, num_tokens * sizeof(int)));
+    CHECK_CUDA(cudaMemcpy(d_input_ids, input_ids.data(), num_tokens * sizeof(int), cudaMemcpyHostToDevice));
+
+    // Ensure embedding table is on device
+    embed_tokens_.to_device(0);
+
+    // Allocate output tensor on device
     Tensor hidden_states({batch, seq_len, HIDDEN_SIZE});
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t i = 0; i < seq_len; i++) {
-            int token_id = input_ids[b * seq_len + i];
-            for (size_t j = 0; j < HIDDEN_SIZE; j++) {
-                hidden_states.at(b, i, j) = embed_tokens_.at(token_id, j);
-            }
-        }
-    }
+    hidden_states.to_device(0);
+
+    // Launch embedding lookup kernel
+    size_t total = num_tokens * HIDDEN_SIZE;
+    dim3 block(256);
+    dim3 grid((total + 255) / 256);
+
+    embedding_lookup_kernel<<<grid, block>>>(
+        d_input_ids, embed_tokens_.device_data(),
+        hidden_states.device_data(),
+        num_tokens, HIDDEN_SIZE);
+
+    CHECK_CUDA(cudaFree(d_input_ids));
+    hidden_states.mark_device_dirty();
     
     // Compute RoPE embeddings
     Tensor cos({seq_len, HEAD_DIM});
     Tensor sin({seq_len, HEAD_DIM});
+    cos.copy_to_device(0);
+    sin.copy_to_device(0);
+
     rotary_emb_->forward(seq_len, cos, sin);
     
     // Create causal attention mask (not strictly needed for CPU impl)
@@ -682,8 +857,6 @@ void LFM2Model::forward(const std::vector<int>& input_ids, size_t batch, size_t 
     // Keep activations on base GPU (0) and let MoE dispatch handle expert parallelism internally.
     CHECK_CUDA(cudaSetDevice(0));
     hidden_states.copy_to_device(0);
-    cos.copy_to_device(0);
-    sin.copy_to_device(0);
     
     for (size_t i = 0; i < NUM_HIDDEN_LAYERS; i++) {
         double start_time = get_time_layer();
@@ -697,27 +870,30 @@ void LFM2Model::forward(const std::vector<int>& input_ids, size_t batch, size_t 
         std::cout << "  Layer " << i << " forward time: " << (end_time - start_time) << " seconds" << std::endl;
     }
     
-    // Final operations on GPU 3
-    CHECK_CUDA(cudaSetDevice(3));
-    hidden_states.copy_to_device(3);
-    
+    // Final operations on GPU 0 (keep on same device)
+    CHECK_CUDA(cudaSetDevice(0));
+
     // Final norm
     Tensor normed_output({batch, seq_len, HIDDEN_SIZE});
     norm_->forward(hidden_states, normed_output);
-    
-    // LM head projection (only for last token in generation)
-    normed_output.to_host();
-    Tensor last_hidden({batch, 1, HIDDEN_SIZE});
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t i = 0; i < HIDDEN_SIZE; i++) {
-            last_hidden.at(b, 0, i) = normed_output.at(b, seq_len - 1, i);
-        }
-    }
-    
-    Tensor last_hidden_flat = last_hidden.view({batch, HIDDEN_SIZE});
+
+    // Extract last token using GPU kernel
+    Tensor last_hidden({batch, HIDDEN_SIZE});
+    last_hidden.to_device(0);
+
+    size_t total_last = batch * HIDDEN_SIZE;
+    dim3 block_last(256);
+    dim3 grid_last((total_last + 255) / 256);
+
+    extract_last_token_kernel<<<grid_last, block_last>>>(
+        normed_output.device_data(), last_hidden.device_data(),
+        batch, seq_len, HIDDEN_SIZE);
+    last_hidden.mark_device_dirty();
+
+    // LM head projection on GPU
     logits = Tensor({batch, VOCAB_SIZE});
-    tensor_ops::matmul_transposed(last_hidden_flat, lm_head_, logits);
-    
+    tensor_ops::matmul_transposed(last_hidden, lm_head_, logits);
+
     // Reset to device 0
     CHECK_CUDA(cudaSetDevice(0));
 }

@@ -7,6 +7,25 @@
 #include <numeric>
 #include "model_loader.h"
 
+// ============================================================================
+// CUDA kernels (for Tensor operations)
+// ============================================================================
+__global__ void transpose_kernel(const float* src, float* dst,
+                                 size_t stride0, size_t stride1,
+                                 size_t outer_size, size_t inner_size) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total_size = outer_size * inner_size;
+    if (idx < total_size) {
+        size_t outer_idx = idx / inner_size;
+        size_t inner_idx = idx % inner_size;
+
+        size_t src_index = outer_idx * stride0 + inner_idx * stride1;
+        size_t dst_index = inner_idx * stride0 + outer_idx * stride1;
+
+        dst[dst_index] = src[src_index];
+    }
+}
+
 // Global model loader is declared in model.h
 extern std::unique_ptr<ModelLoader> g_model_loader;
 
@@ -288,6 +307,91 @@ void Tensor::save_to_file(const std::string& filename) const {
 }
 
 // Tensor operations
+Tensor Tensor::transpose(int dim0, int dim1) const {
+    // Create new shape by swapping dim0 and dim1
+    std::vector<size_t> new_shape = shape_;
+    std::swap(new_shape[dim0], new_shape[dim1]);
+    
+    // Create new tensor
+    Tensor result(new_shape);
+    
+    // Ensure source data is on device
+    to_device();
+    
+    // Allocate device memory for result
+    result.to_device();
+    
+    // Compute strides
+    size_t stride0 = compute_stride(dim0);
+    size_t stride1 = compute_stride(dim1);
+
+    // Transpose data
+    size_t outer_size = 1;
+    for (size_t i = 0; i < static_cast<size_t>(std::min(dim0, dim1)); i++) {
+        outer_size *= shape_[i];
+    }
+    size_t inner_size = 1;
+    for (size_t i = static_cast<size_t>(std::max(dim0, dim1)) + 1; i < shape_.size(); i++) {
+        inner_size *= shape_[i];
+    }
+
+    transpose_kernel<<<(outer_size * inner_size + 255) / 256, 256>>>(
+        device_data_, result.device_data_,
+        stride0, stride1,
+        outer_size, inner_size
+    );
+    CHECK_CUDA(cudaDeviceSynchronize());
+    result.device_dirty_ = true;
+    return result;
+}
+
+Tensor Tensor::slice(int dim, size_t start, size_t end) const {
+    if (dim < 0) dim += shape_.size();
+    if (dim < 0 || static_cast<size_t>(dim) >= shape_.size()) {
+        throw std::out_of_range("Dimension out of range");
+    }
+    if (start >= end || end > shape_[dim]) {
+        throw std::out_of_range("Invalid slice indices");
+    }
+    
+    // Create new shape
+    std::vector<size_t> new_shape = shape_;
+    new_shape[dim] = end - start;
+    
+    // Create new tensor
+    Tensor result(new_shape);
+    
+    // Ensure source data is on device
+    to_device();
+    
+    // Allocate device memory for result
+    result.to_device();
+    
+    // Copy sliced data
+    size_t slice_size = 1;
+    for (size_t i = dim + 1; i < shape_.size(); i++) {
+        slice_size *= shape_[i];
+    }
+    size_t num_slices = 1;
+    for (size_t i = 0; i < static_cast<size_t>(dim); i++) {
+        num_slices *= shape_[i];
+    }
+    
+    for (size_t i = 0; i < num_slices; i++) {
+        size_t src_offset = i * shape_[dim] * slice_size + start * slice_size;
+        size_t dst_offset = i * (end - start) * slice_size;
+        CHECK_CUDA(cudaMemcpy(
+            result.device_data_ + dst_offset,
+            device_data_ + src_offset,
+            (end - start) * slice_size * sizeof(float),
+            cudaMemcpyDeviceToDevice
+        ));
+    }
+    
+    result.device_dirty_ = true;
+    return result;
+}
+
 Tensor Tensor::copy() const {
     ensure_host_data();
     return Tensor(shape_, host_data_, true);

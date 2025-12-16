@@ -18,7 +18,6 @@ namespace tensor_ops {
 constexpr int BLOCK_MM = 32;  // Increased for better tiling performance
 constexpr int BLOCK_OPS = 256;
 constexpr int BLOCK_SFTMX = 1024;
-constexpr int BLOCK_RMS = 128;
 
 inline dim3 make_grid_2d(size_t x, size_t y, int tx = 32, int ty = 32) {
     return dim3((x + tx - 1) / tx, (y + ty - 1) / ty);
@@ -229,19 +228,60 @@ __global__ void softmax_kernel(const float* X, float* Y, size_t inner) {
     }
 }
 
-// RMS normalization: Y[row, :] = X[row, :] * W[:] / (sqrt(mean(X[row, :]^2) + eps))
+// RMS normalization with block-level reduction
+// Each block handles one row, threads cooperate to compute sum of squares
+// Y[row, :] = X[row, :] * W[:] * rsqrt(mean(X[row, :]^2) + eps)
 __global__ void rms_norm_kernel(
     const float* X, const float* W, float eps,
     float* Y, size_t hidden, size_t rows) {
 
-    size_t row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row < rows) {
-        const float* x = X + row * hidden;
-        float* y = Y + row * hidden;
-        float sum = 0.0f;
-        for (size_t j = 0; j < hidden; ++j) sum += x[j] * x[j];
-        float rms = rsqrtf(sum / hidden + eps);
-        for (size_t j = 0; j < hidden; ++j) y[j] = x[j] * rms * W[j];
+    size_t row = blockIdx.x;
+    if (row >= rows) return;
+
+    const float* x = X + row * hidden;
+    float* y = Y + row * hidden;
+
+    // Step 1: Compute partial sum of squares using all threads
+    float local_sum = 0.0f;
+    for (size_t j = threadIdx.x; j < hidden; j += blockDim.x) {
+        float val = x[j];
+        local_sum += val * val;
+    }
+
+    // Step 2: Warp-level reduction
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
+    }
+
+    // Step 3: Block-level reduction using shared memory
+    __shared__ float warp_sums[32];  // max 32 warps per block
+    int lane = threadIdx.x % warpSize;
+    int wid = threadIdx.x / warpSize;
+
+    if (lane == 0) {
+        warp_sums[wid] = local_sum;
+    }
+    __syncthreads();
+
+    // First warp does final reduction
+    float total_sum = 0.0f;
+    if (wid == 0) {
+        int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+        local_sum = (lane < num_warps) ? warp_sums[lane] : 0.0f;
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
+        }
+        if (lane == 0) {
+            warp_sums[0] = local_sum;
+        }
+    }
+    __syncthreads();
+    total_sum = warp_sums[0];
+
+    // Step 4: Compute rms and apply normalization
+    float rms = rsqrtf(total_sum / hidden + eps);
+    for (size_t j = threadIdx.x; j < hidden; j += blockDim.x) {
+        y[j] = x[j] * rms * W[j];
     }
 }
 
@@ -523,7 +563,7 @@ void matmul(const Tensor& a, const Tensor& b, Tensor& c) {
     dim3 block(BLOCK_MM, BLOCK_MM);
     dim3 grid = make_grid_2d(n, m, block.x, block.y);
     matmul_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
-    CHECK_CUDA(cudaDeviceSynchronize());
+    // No sync needed - same stream executes sequentially
     c.mark_device_dirty();
 }
 
@@ -539,7 +579,7 @@ void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c) {
     dim3 block(BLOCK_MM, BLOCK_MM);
     dim3 grid = make_grid_2d(n, m, block.x, block.y);
     matmul_transpose_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
-    CHECK_CUDA(cudaDeviceSynchronize());
+    // No sync needed - same stream executes sequentially
     c.mark_device_dirty();
 }
 
@@ -553,7 +593,6 @@ void add(const Tensor& a, const Tensor& b, Tensor& c) {
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     add_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), n);
-    CHECK_CUDA(cudaDeviceSynchronize());
     c.mark_device_dirty();
 }
 
@@ -565,7 +604,6 @@ void add_scalar(const Tensor& a, float b, Tensor& c) {
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     add_scalar_kernel<<<grid, block>>>(a.device_data(), b, c.device_data(), n);
-    CHECK_CUDA(cudaDeviceSynchronize());
     c.mark_device_dirty();
 }
 
@@ -578,7 +616,6 @@ void mul(const Tensor& a, const Tensor& b, Tensor& c) {
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     mul_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), n);
-    CHECK_CUDA(cudaDeviceSynchronize());
     c.mark_device_dirty();
 }
 
@@ -590,7 +627,6 @@ void mul_scalar(const Tensor& a, float b, Tensor& c) {
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     mul_scalar_kernel<<<grid, block>>>(a.device_data(), b, c.device_data(), n);
-    CHECK_CUDA(cudaDeviceSynchronize());
     c.mark_device_dirty();
 }
 
@@ -603,7 +639,6 @@ void sigmoid(const Tensor& x, Tensor& y) {
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     sigmoid_kernel<<<grid, block>>>(x.device_data(), y.device_data(), n);
-    CHECK_CUDA(cudaDeviceSynchronize());
     y.mark_device_dirty();
 }
 
@@ -615,7 +650,6 @@ void silu(const Tensor& x, Tensor& y) {
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     silu_kernel<<<grid, block>>>(x.device_data(), y.device_data(), n);
-    CHECK_CUDA(cudaDeviceSynchronize());
     y.mark_device_dirty();
 }
 
@@ -647,8 +681,9 @@ void rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& y) {
     x.to_device(-1);
     weight.to_device(-1);
     y.to_device(-1);
-    dim3 block(BLOCK_RMS);
-    dim3 grid((outer_size + block.x - 1) / block.x);
+    // New kernel: one block per row, 256 threads per block for parallel reduction
+    dim3 block(256);
+    dim3 grid(outer_size);
     rms_norm_kernel<<<grid, block>>>(x.device_data(), weight.device_data(), eps,
                                      y.device_data(), hidden_size, outer_size);
     CHECK_CUDA(cudaDeviceSynchronize());
@@ -714,7 +749,6 @@ void repeat_kv(const Tensor& x, size_t n_rep, Tensor& y) {
     dim3 grid((total + block.x - 1) / block.x);
     repeat_kv_kernel<<<grid, block>>>(x.device_data(), y.device_data(),
                                       batch, num_kv_heads, n_rep, seq_len, head_dim);
-    CHECK_CUDA(cudaDeviceSynchronize());
     y.mark_device_dirty();
 }
 
@@ -724,7 +758,7 @@ void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias, Te
     // weight: (channels, 1, kernel_size) - grouped conv weights
     // bias: (channels) [optional]
     // y: (batch, channels, seq_len)
-    
+
     size_t batch = x.size(0);
     size_t channels = x.size(1);
     size_t seq_len = x.size(2);
@@ -740,7 +774,6 @@ void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias, Te
     causal_conv1d_kernel<<<grid, block>>>(x.device_data(), weight.device_data(),
                                           bias ? bias->device_data() : nullptr,
                                           y.device_data(), batch, channels, seq_len, kernel_size);
-    CHECK_CUDA(cudaDeviceSynchronize());
     y.mark_device_dirty();
 }
 
@@ -759,7 +792,6 @@ void reshape_to_heads(const Tensor& in, Tensor& out,
     dim3 grid((total + block.x - 1) / block.x);
     reshape_to_heads_kernel<<<grid, block>>>(in.device_data(), out.device_data(),
                                               batch, seq_len, num_heads, head_dim);
-    CHECK_CUDA(cudaDeviceSynchronize());
     out.mark_device_dirty();
 }
 
@@ -774,7 +806,6 @@ void reshape_from_heads(const Tensor& in, Tensor& out,
     dim3 grid((total + block.x - 1) / block.x);
     reshape_from_heads_kernel<<<grid, block>>>(in.device_data(), out.device_data(),
                                                 batch, seq_len, num_heads, head_dim);
-    CHECK_CUDA(cudaDeviceSynchronize());
     out.mark_device_dirty();
 }
 
@@ -813,7 +844,6 @@ void batched_attention(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor
     batched_attention_kernel<<<num_blocks, threads_per_block, shared_mem_size>>>(
         Q.device_data(), K.device_data(), V.device_data(), out.device_data(),
         batch, num_heads, seq_len, head_dim, scale);
-    CHECK_CUDA(cudaDeviceSynchronize());
     out.mark_device_dirty();
 }
 
@@ -828,7 +858,6 @@ void reshape_for_layernorm(const Tensor& in, Tensor& out,
     dim3 grid((total + block.x - 1) / block.x);
     reshape_for_layernorm_kernel<<<grid, block>>>(in.device_data(), out.device_data(),
                                                    batch, seq_len, num_heads, head_dim);
-    CHECK_CUDA(cudaDeviceSynchronize());
     out.mark_device_dirty();
 }
 
@@ -839,19 +868,18 @@ void transpose_split_BCx(const Tensor& in_proj_out,
     if (B.size() == 0) B = Tensor({batch, hidden_size, seq_len});
     if (C.size() == 0) C = Tensor({batch, hidden_size, seq_len});
     if (x_gate.size() == 0) x_gate = Tensor({batch, hidden_size, seq_len});
-    
+
     in_proj_out.to_device(-1);
     B.to_device(-1);
     C.to_device(-1);
     x_gate.to_device(-1);
-    
+
     size_t total = batch * hidden_size * seq_len;
     dim3 block(BLOCK_OPS);
     dim3 grid((total + block.x - 1) / block.x);
     transpose_split_BCx_kernel<<<grid, block>>>(in_proj_out.device_data(),
                                                  B.device_data(), C.device_data(), x_gate.device_data(),
                                                  batch, seq_len, hidden_size);
-    CHECK_CUDA(cudaDeviceSynchronize());
     B.mark_device_dirty();
     C.mark_device_dirty();
     x_gate.mark_device_dirty();
@@ -868,7 +896,6 @@ void transpose_hidden_seq(const Tensor& in, Tensor& out,
     dim3 grid((total + block.x - 1) / block.x);
     transpose_hidden_seq_kernel<<<grid, block>>>(in.device_data(), out.device_data(),
                                                   batch, hidden_size, seq_len);
-    CHECK_CUDA(cudaDeviceSynchronize());
     out.mark_device_dirty();
 }
 
@@ -898,12 +925,8 @@ RotaryEmbedding::RotaryEmbedding() : max_seq_len_(MAX_POSITION_EMBEDDINGS) {
 void RotaryEmbedding::forward(size_t seq_len, Tensor& cos, Tensor& sin) {
     // Return cached values for the given sequence length
     // cos, sin should be: (seq_len, head_dim)
-    #pragma omp parallel for collapse(2)
-    for (size_t i = 0; i < seq_len; i++) {
-        for (size_t j = 0; j < HEAD_DIM; j++) {
-            cos.at(i, j) = cos_cached_.at(i, j);
-            sin.at(i, j) = sin_cached_.at(i, j);
-        }
-    }
+
+    cos = cos_cached_.slice(0, 0, seq_len);
+    sin = sin_cached_.slice(0, 0, seq_len);
 }
 
