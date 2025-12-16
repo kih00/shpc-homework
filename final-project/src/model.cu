@@ -13,6 +13,75 @@
 std::unique_ptr<ModelLoader> g_model_loader;
 
 // ============================================================================
+// CUDA Kernels for SparseMoeBlock
+// ============================================================================
+
+// Top-K routing kernel for Sparse MoE
+// Computes sigmoid(router_logits) + optional bias, then selects top-k per token
+// router_logits: (num_tokens, num_experts)
+// expert_bias: (num_experts) - optional, can be nullptr
+// topk_indices: (num_tokens, num_experts_per_tok) - output indices
+// topk_weights: (num_tokens, num_experts_per_tok) - output weights
+__global__ void route_tokens_kernel(
+    const float* router_logits, const float* expert_bias,
+    int* topk_indices, float* topk_weights,
+    size_t num_tokens, size_t num_experts, size_t num_experts_per_tok,
+    bool norm_topk_prob, float routed_scaling_factor) {
+
+    size_t t = blockIdx.x; // token index
+    if (t >= num_tokens) return;
+    if (threadIdx.x != 0) return; // only one thread does work per token
+
+    // Local buffers for selection (num_experts_per_tok is small, e.g., 4)
+    const int MAX_K = 32;
+    int sel_idx[MAX_K];
+    float sel_w[MAX_K];
+
+    // Greedy top-k selection
+    for (size_t k = 0; k < num_experts_per_tok; k++) {
+        float best_score = -1e30f;
+        int best_idx = 0;
+
+        for (size_t j = 0; j < num_experts; j++) {
+            // Skip already selected experts
+            bool used = false;
+            for (size_t kk = 0; kk < k; kk++) {
+                if (sel_idx[kk] == (int)j) { used = true; break; }
+            }
+            if (used) continue;
+
+            float logit = router_logits[t * num_experts + j];
+            float w = 1.0f / (1.0f + expf(-logit));  // sigmoid
+            float score = (expert_bias != nullptr) ? (w + expert_bias[j]) : w;
+            
+            if (score > best_score) {
+                best_score = score;
+                best_idx = j;
+            }
+        }
+
+        sel_idx[k] = best_idx;
+        // Get original sigmoid weight (without bias) for routing
+        float routed_w = 1.0f / (1.0f + expf(-router_logits[t * num_experts + best_idx]));
+        sel_w[k] = routed_w;
+    }
+
+    // Normalize selected weights if needed
+    if (norm_topk_prob) {
+        float sum = 0.0f;
+        for (size_t k = 0; k < num_experts_per_tok; k++) sum += sel_w[k];
+        float inv = (sum > 1e-6f) ? (1.0f / sum) : 0.0f;
+        for (size_t k = 0; k < num_experts_per_tok; k++) sel_w[k] *= inv;
+    }
+
+    // Store results with scaling
+    for (size_t k = 0; k < num_experts_per_tok; k++) {
+        topk_indices[t * num_experts_per_tok + k] = sel_idx[k];
+        topk_weights[t * num_experts_per_tok + k] = sel_w[k] * routed_scaling_factor;
+    }
+}
+
+// ============================================================================
 // Large Block Implementations - Complex layers and modules
 // ============================================================================
 
@@ -95,62 +164,51 @@ SparseMoeBlock::SparseMoeBlock(int layer_idx) {
 void SparseMoeBlock::route_tokens(const Tensor& router_logits, 
                                    std::vector<int>& top_k_indices,
                                    std::vector<float>& top_k_weights) {
-    // router_logits: (batch * seq_len, num_experts)
+    // router_logits: (batch * seq_len, num_experts) - should already be on GPU
     size_t num_tokens = router_logits.size(0);
     
+    // Resize output vectors
     top_k_indices.resize(num_tokens * NUM_EXPERTS_PER_TOK);
     top_k_weights.resize(num_tokens * NUM_EXPERTS_PER_TOK);
     
-    for (size_t t = 0; t < num_tokens; t++) {
-        // Apply sigmoid to get routing weights
-        std::vector<float> routing_weights(NUM_EXPERTS);
-        for (size_t e = 0; e < NUM_EXPERTS; e++) {
-            float logit = router_logits.at(t, e);
-            routing_weights[e] = 1.0f / (1.0f + std::exp(-logit));
-        }
-        
-        // Prepare scores for selection (with bias if used)
-        std::vector<std::pair<float, int>> scores(NUM_EXPERTS);
-        if (USE_EXPERT_BIAS) {
-            for (size_t e = 0; e < NUM_EXPERTS; e++) {
-                scores[e] = {routing_weights[e] + expert_bias_[e], e};
-            }
-        } else {
-            for (size_t e = 0; e < NUM_EXPERTS; e++) {
-                scores[e] = {routing_weights[e], e};
-            }
-        }
-        
-        // Sort and get top-k based on scores
-        std::partial_sort(scores.begin(), scores.begin() + NUM_EXPERTS_PER_TOK, scores.end(),
-                         [](const auto& a, const auto& b) { return a.first > b.first; });
-        
-        // Get selected expert indices and their routing weights (from original sigmoid, not with bias)
-        std::vector<float> selected_weights(NUM_EXPERTS_PER_TOK);
-        for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; k++) {
-            int expert_idx = scores[k].second;
-            top_k_indices[t * NUM_EXPERTS_PER_TOK + k] = expert_idx;
-            selected_weights[k] = routing_weights[expert_idx];  // Use original sigmoid weight
-        }
-        
-        // Normalize by sum (not softmax!) - matches Python: routing_weights / routing_weights.sum()
-        if (NORM_TOPK_PROB) {
-            float sum = 0.0f;
-            for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; k++) {
-                sum += selected_weights[k];
-            }
-            if (sum > 1e-6f) {  // Python uses 1e-6 epsilon
-                for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; k++) {
-                    selected_weights[k] /= sum;
-                }
-            }
-        }
-        
-        // Apply scaling factor and store
-        for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; k++) {
-            top_k_weights[t * NUM_EXPERTS_PER_TOK + k] = selected_weights[k] * ROUTED_SCALING_FACTOR;
-        }
+    // Ensure router_logits is on device
+    router_logits.to_device(-1);
+    
+    // Allocate device buffers for kernel outputs
+    int* d_topk_indices;
+    float* d_topk_weights;
+    CHECK_CUDA(cudaMalloc(&d_topk_indices, num_tokens * NUM_EXPERTS_PER_TOK * sizeof(int)));
+    CHECK_CUDA(cudaMalloc(&d_topk_weights, num_tokens * NUM_EXPERTS_PER_TOK * sizeof(float)));
+    
+    // Get expert_bias device pointer (nullptr if not used)
+    const float* d_expert_bias = nullptr;
+    if (USE_EXPERT_BIAS && expert_bias_.size() > 0) {
+        expert_bias_.to_device(-1);
+        d_expert_bias = expert_bias_.device_data();
     }
+    
+    // Launch routing kernel - one block per token
+    dim3 block(1);  // Single thread per block (greedy selection is sequential per token)
+    dim3 grid(num_tokens);
+    
+    route_tokens_kernel<<<grid, block>>>(
+        router_logits.device_data(), d_expert_bias,
+        d_topk_indices, d_topk_weights,
+        num_tokens, NUM_EXPERTS, NUM_EXPERTS_PER_TOK,
+        NORM_TOPK_PROB, ROUTED_SCALING_FACTOR);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    
+    // Copy results back to host vectors
+    CHECK_CUDA(cudaMemcpy(top_k_indices.data(), d_topk_indices, 
+                          num_tokens * NUM_EXPERTS_PER_TOK * sizeof(int), 
+                          cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(top_k_weights.data(), d_topk_weights,
+                          num_tokens * NUM_EXPERTS_PER_TOK * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    
+    // Free temporary device buffers
+    CHECK_CUDA(cudaFree(d_topk_indices));
+    CHECK_CUDA(cudaFree(d_topk_weights));
 }
 
 void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) {
@@ -160,19 +218,15 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
     size_t hidden_size = x.size(2);
     const int base_device = 0;
 
-    // Ensure host view is up-to-date for routing decisions
-    x.to_host();
-
     // Flatten
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
 
-    // Compute router logits on base device
+    // Compute router logits on base device (GPU)
     CHECK_CUDA(cudaSetDevice(base_device));
     router_logits = Tensor({batch * seq_len, NUM_EXPERTS});
     tensor_ops::matmul_transposed(x_flat, gate_, router_logits);
-    router_logits.to_host();
 
-    // Route tokens
+    // Route tokens using GPU kernel (via route_tokens method)
     std::vector<int> top_k_indices;
     std::vector<float> top_k_weights;
     route_tokens(router_logits, top_k_indices, top_k_weights);
@@ -188,6 +242,9 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
             weights_per_expert[expert_idx].push_back(weight);
         }
     }
+
+    // Ensure x_flat is on host for expert input packing
+    x_flat.to_host();
 
     // Prepare per-GPU expert inputs and outputs
     // Group experts by device
@@ -214,21 +271,23 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
         int dev = omp_get_thread_num();
         CHECK_CUDA(cudaSetDevice(dev));
 
+        const float* x_flat_ptr = x_flat.data();
+
         for (size_t i = 0; i < expert_indices[dev].size(); i++) {
             size_t expert_idx = expert_indices[dev][i];
             const auto& token_list = tokens_per_expert[expert_idx];
-            const auto& weight_list = weights_per_expert[expert_idx];
             size_t tok_count = token_list.size();
 
             if (tok_count == 0) continue;
 
-            // Pack tokens for this expert
+            // Pack tokens for this expert using memcpy (row-wise)
             Tensor expert_in({tok_count, 1, hidden_size});
+            float* expert_in_ptr = expert_in.data();
             for (size_t idx = 0; idx < tok_count; idx++) {
                 size_t t = token_list[idx];
-                for (size_t h = 0; h < hidden_size; h++) {
-                    expert_in.at(idx, 0, h) = x_flat.at(t, h);
-                }
+                std::memcpy(expert_in_ptr + idx * hidden_size,
+                           x_flat_ptr + t * hidden_size,
+                           hidden_size * sizeof(float));
             }
 
             // Execute expert on its owning GPU
@@ -241,9 +300,10 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
         }
     }
 
-    // Accumulate results on host (single-threaded to avoid race conditions)
+    // Accumulate results on host
     y = Tensor({batch, seq_len, hidden_size});
-    y.zero();
+    float* y_ptr = y.data();
+    std::memset(y_ptr, 0, batch * seq_len * hidden_size * sizeof(float));
 
     for (int dev = 0; dev < EXPERT_PARALLEL_GPUS; dev++) {
         for (size_t i = 0; i < expert_indices[dev].size(); i++) {
@@ -254,13 +314,14 @@ void SparseMoeBlock::forward(const Tensor& x, Tensor& y, Tensor& router_logits) 
 
             if (expert_out.size() == 0) continue;
 
+            const float* out_ptr = expert_out.data();
             for (size_t idx = 0; idx < token_list.size(); idx++) {
                 size_t t = token_list[idx];
-                size_t b = t / seq_len;
-                size_t s = t % seq_len;
                 float w = weight_list[idx];
+                float* y_row = y_ptr + t * hidden_size;
+                const float* out_row = out_ptr + idx * hidden_size;
                 for (size_t h = 0; h < hidden_size; h++) {
-                    y.at(b, s, h) += w * expert_out.at(idx, 0, h);
+                    y_row[h] += w * out_row[h];
                 }
             }
         }
@@ -315,38 +376,10 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
     Tensor k_for_norm({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
     Tensor v_reshaped({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
 
-    // GPU reshape: (batch*seq, heads*dim) -> (batch, seq, heads, dim)
-    // We need a slightly different kernel for this layout
-    // For now, use reshape_to_heads which gives (batch, heads, seq, dim) and transpose in RMSNorm
-    // Actually, let's just reshape properly for layernorm input
-
-    // Reshape for layernorm: (batch*seq, heads*dim) -> (batch, seq, heads, dim)
-    {
-        q_proj_out.to_host();
-        for (size_t b = 0; b < batch; b++) {
-            for (size_t s = 0; s < seq_len; s++) {
-                for (size_t h = 0; h < NUM_ATTENTION_HEADS; h++) {
-                    for (size_t d = 0; d < HEAD_DIM; d++) {
-                        q_for_norm.at(b, s, h, d) = q_proj_out.at(b * seq_len + s, h * HEAD_DIM + d);
-                    }
-                }
-            }
-        }
-    }
-    {
-        k_proj_out.to_host();
-        v_proj_out.to_host();
-        for (size_t b = 0; b < batch; b++) {
-            for (size_t s = 0; s < seq_len; s++) {
-                for (size_t h = 0; h < NUM_KEY_VALUE_HEADS; h++) {
-                    for (size_t d = 0; d < HEAD_DIM; d++) {
-                        k_for_norm.at(b, s, h, d) = k_proj_out.at(b * seq_len + s, h * HEAD_DIM + d);
-                        v_reshaped.at(b, s, h, d) = v_proj_out.at(b * seq_len + s, h * HEAD_DIM + d);
-                    }
-                }
-            }
-        }
-    }
+    // GPU reshape: (batch*seq, heads*dim) -> (batch, seq, heads, dim) using CUDA kernel
+    tensor_ops::reshape_for_layernorm(q_proj_out, q_for_norm, batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM);
+    tensor_ops::reshape_for_layernorm(k_proj_out, k_for_norm, batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM);
+    tensor_ops::reshape_for_layernorm(v_proj_out, v_reshaped, batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM);
 
     // Apply layernorm to Q and K (normalizes over last dim = head_dim)
     Tensor q_normed({batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM});
@@ -448,30 +481,12 @@ void ShortConv::forward(const Tensor& x, Tensor& y) {
         }
     }
     
-    // Reshape and transpose: (batch, seq_len, 3*hidden_size) -> (batch, 3*hidden_size, seq_len)
-    Tensor BCx({batch, 3 * hidden_size, seq_len});
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t s = 0; s < seq_len; s++) {
-            for (size_t c = 0; c < 3 * hidden_size; c++) {
-                BCx.at(b, c, s) = in_proj_out.at(b * seq_len + s, c);
-            }
-        }
-    }
-    
-    // Split into 3 parts along channel dim: B, C, x_gate (each: batch, hidden_size, seq_len)
+    // Fused transpose and split: (batch*seq, 3*hidden) -> B, C, x_gate each (batch, hidden, seq)
+    // Using CUDA kernel for efficiency
     Tensor B({batch, hidden_size, seq_len});
     Tensor C({batch, hidden_size, seq_len});
     Tensor x_gate({batch, hidden_size, seq_len});
-    
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t h = 0; h < hidden_size; h++) {
-            for (size_t s = 0; s < seq_len; s++) {
-                B.at(b, h, s) = BCx.at(b, h, s);
-                C.at(b, h, s) = BCx.at(b, h + hidden_size, s);
-                x_gate.at(b, h, s) = BCx.at(b, h + 2 * hidden_size, s);
-            }
-        }
-    }
+    tensor_ops::transpose_split_BCx(in_proj_out, B, C, x_gate, batch, seq_len, hidden_size);
     
     // Bx = B * x_gate (element-wise)
     Tensor Bx({batch, hidden_size, seq_len});
@@ -486,14 +501,9 @@ void ShortConv::forward(const Tensor& x, Tensor& y) {
     tensor_ops::mul(C, conv_out, y_pre);
     
     // Transpose back: (batch, hidden_size, seq_len) -> (batch, seq_len, hidden_size)
+    // Using CUDA kernel for efficiency
     Tensor y_pre_transposed({batch, seq_len, hidden_size});
-    for (size_t b = 0; b < batch; b++) {
-        for (size_t s = 0; s < seq_len; s++) {
-            for (size_t h = 0; h < hidden_size; h++) {
-                y_pre_transposed.at(b, s, h) = y_pre.at(b, h, s);
-            }
-        }
-    }
+    tensor_ops::transpose_hidden_seq(y_pre, y_pre_transposed, batch, hidden_size, seq_len);
     
     // out_proj: (batch*seq_len, hidden_size) @ (hidden_size, hidden_size)^T -> (batch*seq_len, hidden_size)
     Tensor y_pre_flat = y_pre_transposed.view({batch * seq_len, hidden_size});

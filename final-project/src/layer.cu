@@ -382,6 +382,68 @@ __global__ void reshape_from_heads_kernel(
     out[idx] = in[in_idx];
 }
 
+// Reshape: (batch*seq, heads*dim) -> (batch, seq, heads, dim) for layernorm input
+__global__ void reshape_for_layernorm_kernel(
+    const float* in, float* out,
+    size_t batch, size_t seq_len, size_t num_heads, size_t head_dim) {
+
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = batch * seq_len * num_heads * head_dim;
+    if (idx >= total) return;
+
+    // Output index: [b, s, h, d] -> idx = ((b * seq_len + s) * num_heads + h) * head_dim + d
+    size_t d = idx % head_dim;
+    size_t h = (idx / head_dim) % num_heads;
+    size_t s = (idx / (head_dim * num_heads)) % seq_len;
+    size_t b = idx / (head_dim * num_heads * seq_len);
+
+    // Input index: [b*seq + s, h*head_dim + d]
+    size_t in_idx = (b * seq_len + s) * (num_heads * head_dim) + h * head_dim + d;
+    out[idx] = in[in_idx];
+}
+
+// Transpose and split: (batch*seq, 3*hidden) -> B, C, x_gate each (batch, hidden, seq)
+// Fused operation combining transpose and split for ShortConv
+__global__ void transpose_split_BCx_kernel(
+    const float* in, float* B, float* C, float* x_gate,
+    size_t batch, size_t seq_len, size_t hidden_size) {
+
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = batch * hidden_size * seq_len;
+    if (idx >= total) return;
+
+    // Output index: [b, h, s] -> idx = (b * hidden_size + h) * seq_len + s
+    size_t s = idx % seq_len;
+    size_t h = (idx / seq_len) % hidden_size;
+    size_t b = idx / (seq_len * hidden_size);
+
+    // Input index: [(b * seq_len + s), c] where c = {h, h+hidden, h+2*hidden}
+    size_t base_in_idx = (b * seq_len + s) * (3 * hidden_size);
+    
+    B[idx] = in[base_in_idx + h];
+    C[idx] = in[base_in_idx + h + hidden_size];
+    x_gate[idx] = in[base_in_idx + h + 2 * hidden_size];
+}
+
+// Transpose: (batch, hidden, seq) -> (batch, seq, hidden)
+__global__ void transpose_hidden_seq_kernel(
+    const float* in, float* out,
+    size_t batch, size_t hidden_size, size_t seq_len) {
+
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = batch * seq_len * hidden_size;
+    if (idx >= total) return;
+
+    // Output index: [b, s, h] -> idx = (b * seq_len + s) * hidden_size + h
+    size_t h = idx % hidden_size;
+    size_t s = (idx / hidden_size) % seq_len;
+    size_t b = idx / (hidden_size * seq_len);
+
+    // Input index: [b, h, s] -> (b * hidden_size + h) * seq_len + s
+    size_t in_idx = (b * hidden_size + h) * seq_len + s;
+    out[idx] = in[in_idx];
+}
+
 // Batched Scaled Dot-Product Attention with Causal Mask
 // Q, K, V: (batch, num_heads, seq_len, head_dim)
 // Output: (batch, num_heads, seq_len, head_dim)
@@ -751,6 +813,61 @@ void batched_attention(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor
     batched_attention_kernel<<<num_blocks, threads_per_block, shared_mem_size>>>(
         Q.device_data(), K.device_data(), V.device_data(), out.device_data(),
         batch, num_heads, seq_len, head_dim, scale);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    out.mark_device_dirty();
+}
+
+// Reshape: (batch*seq, heads*dim) -> (batch, seq, heads, dim) for layernorm input
+void reshape_for_layernorm(const Tensor& in, Tensor& out,
+                           size_t batch, size_t seq_len, size_t num_heads, size_t head_dim) {
+    if (out.size() == 0) out = Tensor({batch, seq_len, num_heads, head_dim});
+    in.to_device(-1);
+    out.to_device(-1);
+    size_t total = batch * seq_len * num_heads * head_dim;
+    dim3 block(BLOCK_OPS);
+    dim3 grid((total + block.x - 1) / block.x);
+    reshape_for_layernorm_kernel<<<grid, block>>>(in.device_data(), out.device_data(),
+                                                   batch, seq_len, num_heads, head_dim);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    out.mark_device_dirty();
+}
+
+// Transpose and split: (batch*seq, 3*hidden) -> B, C, x_gate each (batch, hidden, seq)
+void transpose_split_BCx(const Tensor& in_proj_out,
+                         Tensor& B, Tensor& C, Tensor& x_gate,
+                         size_t batch, size_t seq_len, size_t hidden_size) {
+    if (B.size() == 0) B = Tensor({batch, hidden_size, seq_len});
+    if (C.size() == 0) C = Tensor({batch, hidden_size, seq_len});
+    if (x_gate.size() == 0) x_gate = Tensor({batch, hidden_size, seq_len});
+    
+    in_proj_out.to_device(-1);
+    B.to_device(-1);
+    C.to_device(-1);
+    x_gate.to_device(-1);
+    
+    size_t total = batch * hidden_size * seq_len;
+    dim3 block(BLOCK_OPS);
+    dim3 grid((total + block.x - 1) / block.x);
+    transpose_split_BCx_kernel<<<grid, block>>>(in_proj_out.device_data(),
+                                                 B.device_data(), C.device_data(), x_gate.device_data(),
+                                                 batch, seq_len, hidden_size);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    B.mark_device_dirty();
+    C.mark_device_dirty();
+    x_gate.mark_device_dirty();
+}
+
+// Transpose: (batch, hidden, seq) -> (batch, seq, hidden)
+void transpose_hidden_seq(const Tensor& in, Tensor& out,
+                          size_t batch, size_t hidden_size, size_t seq_len) {
+    if (out.size() == 0) out = Tensor({batch, seq_len, hidden_size});
+    in.to_device(-1);
+    out.to_device(-1);
+    size_t total = batch * seq_len * hidden_size;
+    dim3 block(BLOCK_OPS);
+    dim3 grid((total + block.x - 1) / block.x);
+    transpose_hidden_seq_kernel<<<grid, block>>>(in.device_data(), out.device_data(),
+                                                  batch, hidden_size, seq_len);
     CHECK_CUDA(cudaDeviceSynchronize());
     out.mark_device_dirty();
 }

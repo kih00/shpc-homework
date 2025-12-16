@@ -153,4 +153,18 @@ namespace tensor_ops {
     void reshape_from_heads(const Tensor& in, Tensor& out,
                             size_t batch, size_t seq_len, size_t num_heads, size_t head_dim);
     void batched_attention(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& out, float scale);
+
+    // Optimized reshape/transpose operations for Attention and ShortConv
+    // Reshape: (batch*seq, heads*dim) -> (batch, seq, heads, dim) for layernorm input
+    void reshape_for_layernorm(const Tensor& in, Tensor& out,
+                               size_t batch, size_t seq_len, size_t num_heads, size_t head_dim);
+
+    // Transpose and split for ShortConv: (batch*seq, 3*hidden) -> B, C, x_gate each (batch, hidden, seq)
+    void transpose_split_BCx(const Tensor& in_proj_out, 
+                             Tensor& B, Tensor& C, Tensor& x_gate,
+                             size_t batch, size_t seq_len, size_t hidden_size);
+
+    // Transpose: (batch, hidden, seq) -> (batch, seq, hidden)
+    void transpose_hidden_seq(const Tensor& in, Tensor& out,
+                              size_t batch, size_t hidden_size, size_t seq_len);
 }
