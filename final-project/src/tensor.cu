@@ -345,7 +345,7 @@ Tensor Tensor::transpose(int dim0, int dim1) const {
     return result;
 }
 
-Tensor Tensor::slice(int dim, size_t start, size_t end) const {
+Tensor Tensor::slice(int dim, size_t start, size_t end, cudaStream_t stream) const {
     if (dim < 0) dim += shape_.size();
     if (dim < 0 || static_cast<size_t>(dim) >= shape_.size()) {
         throw std::out_of_range("Dimension out of range");
@@ -362,10 +362,10 @@ Tensor Tensor::slice(int dim, size_t start, size_t end) const {
     Tensor result(new_shape);
     
     // Ensure source data is on device
-    to_device();
+    to_device(device_id_, stream);
     
     // Allocate device memory for result
-    result.to_device();
+    result.to_device(device_id_, stream);
     
     // Copy sliced data
     size_t slice_size = 1;
@@ -380,11 +380,12 @@ Tensor Tensor::slice(int dim, size_t start, size_t end) const {
     for (size_t i = 0; i < num_slices; i++) {
         size_t src_offset = i * shape_[dim] * slice_size + start * slice_size;
         size_t dst_offset = i * (end - start) * slice_size;
-        CHECK_CUDA(cudaMemcpy(
+        CHECK_CUDA(cudaMemcpyAsync(
             result.device_data_ + dst_offset,
             device_data_ + src_offset,
             (end - start) * slice_size * sizeof(float),
-            cudaMemcpyDeviceToDevice
+            cudaMemcpyDeviceToDevice,
+            stream
         ));
     }
     

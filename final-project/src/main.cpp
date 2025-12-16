@@ -99,25 +99,39 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
 
+    // Set global MPI rank for conditional debug output
+    g_mpi_rank = mpi_rank;
+
     parse_args(argc, argv);
-    
+
     // Configuration
     std::string model_file = "/mnt/ramdisk/model.bin";
     std::string input_file = "data/inputs.bin";
     std::string output_file = "data/outputs.bin";
-    
+
     ////////////////////////////////////////////////////////////////////
     // INITIALIZATION                                                 //
     ////////////////////////////////////////////////////////////////////
+
+    cudaProfilerStart(); // 제출 시 지우기
 
     int *inputs = nullptr;
     float *outputs = nullptr;
     int32_t total_samples = 0;
     int32_t seq_length = 0;
 
-    /* Only MPI process rank 0 has the inputs and outputs */
+    // Data Parallelism: distribute samples across MPI ranks
+    // Calculate samples per rank (handle uneven distribution)
+    int samples_per_rank = num_samples / mpi_size;
+    int remainder = num_samples % mpi_size;
+    int local_num_samples = samples_per_rank + (mpi_rank < remainder ? 1 : 0);
+
+    // Calculate offset for this rank (used for debugging if needed)
+    (void)(mpi_rank * samples_per_rank + std::min(mpi_rank, remainder));
+
+    /* Rank 0 reads input file and broadcasts metadata */
     if (mpi_rank == 0) fprintf(stdout, "Initializing inputs and outputs...");
-    
+
     if (mpi_rank == 0) {
         // Read input file to get dimensions and data
         std::ifstream infile(input_file, std::ios::binary);
@@ -134,57 +148,78 @@ int main(int argc, char* argv[]) {
         fprintf(stdout, "  Total samples: %d\n", total_samples);
         fprintf(stdout, "  Sequence length: %d\n", seq_length);
         fprintf(stdout, "  Processing samples: %d\n", num_samples);
+        fprintf(stdout, "  MPI ranks: %d\n", mpi_size);
         fprintf(stdout, "\n");
 
-        // Allocate pinned memory for inputs
+        // Allocate pinned memory for all inputs (rank 0 only)
         CHECK_CUDA(cudaMallocHost(&inputs, num_samples * seq_length * sizeof(int)));
-        
+
         // Read all input samples into buffer
         for (int i = 0; i < num_samples; i++) {
             std::vector<int32_t> temp_input(seq_length);
             infile.read(reinterpret_cast<char*>(temp_input.data()), seq_length * sizeof(int32_t));
-            
+
             if (!infile && i < num_samples - 1) {
                 fprintf(stderr, "Warning: Could only read %d samples\n", i);
                 break;
             }
-            
+
             // Copy to pinned memory buffer
             for (int j = 0; j < seq_length; j++) {
                 inputs[i * seq_length + j] = static_cast<int>(temp_input[j]);
             }
         }
-        
+
         infile.close();
 
-        // Allocate pinned memory for outputs
+        // Allocate pinned memory for all outputs (rank 0 only)
         CHECK_CUDA(cudaMallocHost(&outputs, num_samples * VOCAB_SIZE * sizeof(float)));
     }
 
-    // Load model
+    // Broadcast seq_length to all ranks
+    MPI_Bcast(&seq_length, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    // Allocate local input buffer for each rank
+    int *local_inputs = nullptr;
+    CHECK_CUDA(cudaMallocHost(&local_inputs, local_num_samples * seq_length * sizeof(int)));
+
+    // Scatter inputs to all ranks (using MPI_Scatterv for uneven distribution)
+    std::vector<int> sendcounts(mpi_size);
+    std::vector<int> displs(mpi_size);
+    for (int r = 0; r < mpi_size; r++) {
+        int r_samples = samples_per_rank + (r < remainder ? 1 : 0);
+        sendcounts[r] = r_samples * seq_length;
+        displs[r] = (r * samples_per_rank + std::min(r, remainder)) * seq_length;
+    }
+
+    MPI_Scatterv(inputs, sendcounts.data(), displs.data(), MPI_INT,
+                 local_inputs, local_num_samples * seq_length, MPI_INT,
+                 0, MPI_COMM_WORLD);
+
+    // Load model on all ranks
     if (mpi_rank == 0) fprintf(stdout, "Loading model from %s...", model_file.c_str());
     LFM2Model model(model_file);
 
-    /* Warm-up */
-    if (run_warmup && mpi_rank == 0) {
-        fprintf(stdout, "Warming up...");
-        std::vector<int> warmup_input(inputs, inputs + num_samples * seq_length);
+    /* Warm-up on all ranks */
+    if (run_warmup && local_num_samples > 0) {
+        if (mpi_rank == 0) fprintf(stdout, "Warming up...");
+        std::vector<int> warmup_input(local_inputs, local_inputs + local_num_samples * seq_length);
         Tensor warmup_logits;
         for (int i = 0; i < num_warmup; i++) {
-            model.forward(warmup_input, num_samples, seq_length, warmup_logits);
+            model.forward(warmup_input, local_num_samples, seq_length, warmup_logits);
         }
-        fprintf(stdout, "Done!\n\n");
+        if (mpi_rank == 0) fprintf(stdout, "Done!\n\n");
     }
+    MPI_Barrier(MPI_COMM_WORLD);
 
     ////////////////////////////////////////////////////////////////////
-    // MODEL COMPUTATION                                              //
+    // MODEL COMPUTATION (Data Parallel)                              //
     ////////////////////////////////////////////////////////////////////
 
     double st = 0.0, et = 0.0;
-    cudaProfilerStart(); // 제출 시 지우기
 
     if (mpi_rank == 0) {
-        fprintf(stdout, "Generating...");
+        fprintf(stdout, "Generating (Data Parallel with %d ranks)...", mpi_size);
         fflush(stdout);
     }
 
@@ -197,22 +232,24 @@ int main(int argc, char* argv[]) {
 
     if (mpi_rank == 0) st = get_time();
 
-    /* Call the main computation */
-    if (mpi_rank == 0) {
-        // single batch processing
-        // Get input for this sample
-        std::vector<int> input_ids_vec(inputs, inputs + num_samples * seq_length);
+    /* Each rank processes its local samples */
+    float *local_outputs = nullptr;
+    CHECK_CUDA(cudaMallocHost(&local_outputs, local_num_samples * VOCAB_SIZE * sizeof(float)));
+
+    if (local_num_samples > 0) {
+        // Get input for this rank's samples
+        std::vector<int> input_ids_vec(local_inputs, local_inputs + local_num_samples * seq_length);
 
         // Run forward pass
         Tensor logits;
-        model.forward(input_ids_vec, num_samples, seq_length, logits);
+        model.forward(input_ids_vec, local_num_samples, seq_length, logits);
 
         logits.to_host();
-        
-        // Copy logits to output buffer
-        for (int b = 0; b < num_samples; b++) {
+
+        // Copy logits to local output buffer
+        for (int b = 0; b < local_num_samples; b++) {
             for (size_t i = 0; i < VOCAB_SIZE; i++) {
-                outputs[b * VOCAB_SIZE + i] = logits.at(b, i);
+                local_outputs[b * VOCAB_SIZE + i] = logits.at(b, i);
             }
         }
     }
@@ -224,14 +261,31 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaSetDevice(0));
     MPI_Barrier(MPI_COMM_WORLD);
 
+    // Gather outputs to rank 0
+    std::vector<int> recvcounts(mpi_size);
+    std::vector<int> recvdispls(mpi_size);
+    for (int r = 0; r < mpi_size; r++) {
+        int r_samples = samples_per_rank + (r < remainder ? 1 : 0);
+        recvcounts[r] = r_samples * VOCAB_SIZE;
+        recvdispls[r] = (r * samples_per_rank + std::min(r, remainder)) * VOCAB_SIZE;
+    }
+
+    MPI_Gatherv(local_outputs, local_num_samples * VOCAB_SIZE, MPI_FLOAT,
+                outputs, recvcounts.data(), recvdispls.data(), MPI_FLOAT,
+                0, MPI_COMM_WORLD);
+
     if (mpi_rank == 0) {
         et = get_time();
         /* Print the result */
         fprintf(stdout, "Done!\n");
         fprintf(stdout, "Elapsed time: %lf (sec)\n", et - st);
-        fprintf(stdout, "Throughput: %lf (samples/sec)\n\n", 
+        fprintf(stdout, "Throughput: %lf (samples/sec)\n\n",
                 num_samples / (et - st));
     }
+
+    // Free local buffers
+    CHECK_CUDA(cudaFreeHost(local_inputs));
+    CHECK_CUDA(cudaFreeHost(local_outputs));
 
     cudaProfilerStop(); // 제출 시 지우기
 

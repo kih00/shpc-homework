@@ -1,6 +1,6 @@
 #!/bin/bash
 
-: ${NODES:=1}
+: ${NODES:=4}
 # : ${PROFILE:=nsys profile --cudabacktrace=all}
 
 salloc -N $NODES --partition class1 --exclusive --gres=gpu:4   \

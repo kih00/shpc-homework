@@ -3,6 +3,12 @@
 #include <iostream>
 #include <limits>
 
+// Global MPI rank for conditional debug output (defined in model.cu)
+extern int g_mpi_rank;
+
+// Debug print macro - only rank 0 prints
+#define DEBUG_PRINTLN(x) do { if (g_mpi_rank == 0) { std::cout << x << std::endl; } } while(0)
+
 ModelLoader::ModelLoader(const std::string& model_file) : model_file_(model_file) {
     load_index();
 }
@@ -19,8 +25,8 @@ void ModelLoader::load_index() {
     uint32_t num_tensors;
     file.read(reinterpret_cast<char*>(&num_tensors), sizeof(uint32_t));
     
-    std::cout << "Loading model index from " << model_file_ << std::endl;
-    std::cout << "  Number of tensors: " << num_tensors << std::endl;
+    DEBUG_PRINTLN("Loading model index from " << model_file_);
+    DEBUG_PRINTLN("  Number of tensors: " << num_tensors);
     
     // Read index for each tensor
     for (uint32_t i = 0; i < num_tensors; i++) {
@@ -53,7 +59,7 @@ void ModelLoader::load_index() {
     }
     
     file.close();
-    std::cout << "  Index loaded successfully" << std::endl;
+    DEBUG_PRINTLN("  Index loaded successfully");
 }
 
 Tensor ModelLoader::load_tensor(const std::string& name) {

@@ -132,6 +132,14 @@ __global__ void add_scalar_kernel(const float* A, float b, float* C, size_t n) {
     if (idx < n) C[idx] = A[idx] + b;
 }
 
+// Add bias: Y[n] = X[n] + bias[n % cols]
+__global__ void add_bias_kernel(const float* X, const float* bias, float* Y, size_t n, size_t cols) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        Y[idx] = X[idx] + bias[idx % cols];
+    }
+}
+
 // Element-wise multiply: C[n] = A[n] * B[n]
 __global__ void mul_kernel(const float* A, const float* B, float* C, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -551,109 +559,122 @@ __global__ void batched_attention_kernel(
 
 // Matrix operations
 
-void matmul(const Tensor& a, const Tensor& b, Tensor& c) {
+void matmul(const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t stream) {
     // a: (m, k), b: (k, n), c: (m, n)
     size_t m = a.size(0);
     size_t k = a.size(1);
     size_t n = b.size(1);
     if (c.size() == 0) c = Tensor({m, n});
-    a.to_device(-1);  // Use current device
-    b.to_device(-1);
-    c.to_device(-1);
+    a.to_device(-1, stream);  // Use current device
+    b.to_device(-1, stream);
+    c.to_device(-1, stream);
     dim3 block(BLOCK_MM, BLOCK_MM);
     dim3 grid = make_grid_2d(n, m, block.x, block.y);
-    matmul_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
+    matmul_kernel<<<grid, block, 0, stream>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
     // No sync needed - same stream executes sequentially
     c.mark_device_dirty();
 }
 
-void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c) {
+void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t stream) {
     // a: (m, k), b: (n, k), c: (m, n)  [c = a @ b^T]
     size_t m = a.size(0);
     size_t k = a.size(1);
     size_t n = b.size(0);
     if (c.size() == 0) c = Tensor({m, n});
-    a.to_device(-1);
-    b.to_device(-1);
-    c.to_device(-1);
+    a.to_device(-1, stream);
+    b.to_device(-1, stream);
+    c.to_device(-1, stream);
     dim3 block(BLOCK_MM, BLOCK_MM);
     dim3 grid = make_grid_2d(n, m, block.x, block.y);
-    matmul_transpose_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
+    matmul_transpose_kernel<<<grid, block, 0, stream>>>(a.device_data(), b.device_data(), c.device_data(), m, k, n);
     // No sync needed - same stream executes sequentially
     c.mark_device_dirty();
 }
 
 // Element-wise operations
-void add(const Tensor& a, const Tensor& b, Tensor& c) {
+void add(const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t stream) {
     size_t n = a.size();
     if (c.size() == 0) c = Tensor(a.shape());
-    a.to_device(-1);
-    b.to_device(-1);
-    c.to_device(-1);
+    a.to_device(-1, stream);
+    b.to_device(-1, stream);
+    c.to_device(-1, stream);
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
-    add_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), n);
+    add_kernel<<<grid, block, 0, stream>>>(a.device_data(), b.device_data(), c.device_data(), n);
     c.mark_device_dirty();
 }
 
-void add_scalar(const Tensor& a, float b, Tensor& c) {
+void add_scalar(const Tensor& a, float b, Tensor& c, cudaStream_t stream) {
     size_t n = a.size();
     if (c.size() == 0) c = Tensor(a.shape());
-    a.to_device(-1);
-    c.to_device(-1);
+    a.to_device(-1, stream);
+    c.to_device(-1, stream);
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
-    add_scalar_kernel<<<grid, block>>>(a.device_data(), b, c.device_data(), n);
+    add_scalar_kernel<<<grid, block, 0, stream>>>(a.device_data(), b, c.device_data(), n);
     c.mark_device_dirty();
 }
 
-void mul(const Tensor& a, const Tensor& b, Tensor& c) {
-    size_t n = a.size();
-    if (c.size() == 0) c = Tensor(a.shape());
-    a.to_device(-1);
-    b.to_device(-1);
-    c.to_device(-1);
+void add_bias(const Tensor& x, const Tensor& bias, Tensor& y, cudaStream_t stream) {
+    size_t n = x.size();
+    size_t cols = x.size(-1);
+    if (y.size() == 0) y = Tensor(x.shape());
+    x.to_device(-1, stream);
+    bias.to_device(-1, stream);
+    y.to_device(-1, stream);
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
-    mul_kernel<<<grid, block>>>(a.device_data(), b.device_data(), c.device_data(), n);
+    add_bias_kernel<<<grid, block, 0, stream>>>(x.device_data(), bias.device_data(), y.device_data(), n, cols);
+    y.mark_device_dirty();
+}
+
+void mul(const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t stream) {
+    size_t n = a.size();
+    if (c.size() == 0) c = Tensor(a.shape());
+    a.to_device(-1, stream);
+    b.to_device(-1, stream);
+    c.to_device(-1, stream);
+    dim3 block(BLOCK_OPS);
+    dim3 grid((n + block.x - 1) / block.x);
+    mul_kernel<<<grid, block, 0, stream>>>(a.device_data(), b.device_data(), c.device_data(), n);
     c.mark_device_dirty();
 }
 
-void mul_scalar(const Tensor& a, float b, Tensor& c) {
+void mul_scalar(const Tensor& a, float b, Tensor& c, cudaStream_t stream) {
     size_t n = a.size();
     if (c.size() == 0) c = Tensor(a.shape());
-    a.to_device(-1);
-    c.to_device(-1);
+    a.to_device(-1, stream);
+    c.to_device(-1, stream);
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
-    mul_scalar_kernel<<<grid, block>>>(a.device_data(), b, c.device_data(), n);
+    mul_scalar_kernel<<<grid, block, 0, stream>>>(a.device_data(), b, c.device_data(), n);
     c.mark_device_dirty();
 }
 
 // Activation functions
-void sigmoid(const Tensor& x, Tensor& y) {
+void sigmoid(const Tensor& x, Tensor& y, cudaStream_t stream) {
     size_t n = x.size();
     if (y.size() == 0) y = Tensor(x.shape());
-    x.to_device(-1);
-    y.to_device(-1);
+    x.to_device(-1, stream);
+    y.to_device(-1, stream);
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
-    sigmoid_kernel<<<grid, block>>>(x.device_data(), y.device_data(), n);
+    sigmoid_kernel<<<grid, block, 0, stream>>>(x.device_data(), y.device_data(), n);
     y.mark_device_dirty();
 }
 
-void silu(const Tensor& x, Tensor& y) {
+void silu(const Tensor& x, Tensor& y, cudaStream_t stream) {
     size_t n = x.size();
     if (y.size() == 0) y = Tensor(x.shape());
-    x.to_device(-1);
-    y.to_device(-1);
+    x.to_device(-1, stream);
+    y.to_device(-1, stream);
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
-    silu_kernel<<<grid, block>>>(x.device_data(), y.device_data(), n);
+    silu_kernel<<<grid, block, 0, stream>>>(x.device_data(), y.device_data(), n);
     y.mark_device_dirty();
 }
 
-void softmax(const Tensor& x, Tensor& y, int dim) {
+void softmax(const Tensor& x, Tensor& y, int dim, cudaStream_t stream) {
     // For simplicity, assume dim=-1 (last dimension)
     size_t outer_size = 1;
     for (size_t i = 0; i < x.ndim() - 1; i++) {
@@ -661,51 +682,51 @@ void softmax(const Tensor& x, Tensor& y, int dim) {
     }
     size_t inner_size = x.size(-1);
     if (y.size() == 0) y = Tensor(x.shape());
-    x.to_device(-1);
-    y.to_device(-1);
+    x.to_device(-1, stream);
+    y.to_device(-1, stream);
     dim3 block(inner_size >= BLOCK_SFTMX ? BLOCK_SFTMX : inner_size);
     dim3 grid(outer_size);
-    softmax_kernel<<<grid, block>>>(x.device_data(), y.device_data(), inner_size);
-    CHECK_CUDA(cudaDeviceSynchronize());
+    softmax_kernel<<<grid, block, 0, stream>>>(x.device_data(), y.device_data(), inner_size);
+    // CHECK_CUDA(cudaDeviceSynchronize());
     y.mark_device_dirty();
 }
 
 // Normalization
-void rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& y) {
+void rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& y, cudaStream_t stream) {
     size_t outer_size = 1;
     for (size_t i = 0; i < x.ndim() - 1; i++) {
         outer_size *= x.size(i);
     }
     size_t hidden_size = x.size(-1);
     if (y.size() == 0) y = Tensor(x.shape());
-    x.to_device(-1);
-    weight.to_device(-1);
-    y.to_device(-1);
+    x.to_device(-1, stream);
+    weight.to_device(-1, stream);
+    y.to_device(-1, stream);
     // New kernel: one block per row, 256 threads per block for parallel reduction
     dim3 block(256);
     dim3 grid(outer_size);
-    rms_norm_kernel<<<grid, block>>>(x.device_data(), weight.device_data(), eps,
+    rms_norm_kernel<<<grid, block, 0, stream>>>(x.device_data(), weight.device_data(), eps,
                                      y.device_data(), hidden_size, outer_size);
-    CHECK_CUDA(cudaDeviceSynchronize());
+    // CHECK_CUDA(cudaDeviceSynchronize());
     y.mark_device_dirty();
 }
 
 // RoPE operations
 void compute_rope_embeddings(size_t head_dim, size_t max_seq_len, float theta,
-                             Tensor& cos, Tensor& sin) {
+                             Tensor& cos, Tensor& sin, cudaStream_t stream) {
     if (cos.size() == 0) cos = Tensor({max_seq_len, head_dim});
     if (sin.size() == 0) sin = Tensor({max_seq_len, head_dim});
-    cos.to_device(-1);
-    sin.to_device(-1);
+    cos.to_device(-1, stream);
+    sin.to_device(-1, stream);
     dim3 block(BLOCK_OPS);
     dim3 grid((max_seq_len + block.x - 1) / block.x);
-    rope_compute_kernel<<<grid, block>>>(cos.device_data(), sin.device_data(), head_dim, max_seq_len, theta);
-    CHECK_CUDA(cudaDeviceSynchronize());
+    rope_compute_kernel<<<grid, block, 0, stream>>>(cos.device_data(), sin.device_data(), head_dim, max_seq_len, theta);
+    // CHECK_CUDA(cudaDeviceSynchronize());
     cos.mark_device_dirty();
     sin.mark_device_dirty();
 }
 
-void apply_rotary_pos_emb(Tensor& q, Tensor& k, const Tensor& cos, const Tensor& sin) {
+void apply_rotary_pos_emb(Tensor& q, Tensor& k, const Tensor& cos, const Tensor& sin, cudaStream_t stream) {
     // q: (batch, num_q_heads, seq_len, head_dim)
     // k: (batch, num_kv_heads, seq_len, head_dim)
     // cos, sin: (seq_len, head_dim)
@@ -718,42 +739,42 @@ void apply_rotary_pos_emb(Tensor& q, Tensor& k, const Tensor& cos, const Tensor&
     size_t num_kv_heads = k.size(1);
     size_t seq_len = q.size(2);
     size_t head_dim = q.size(3);
-    q.to_device(-1);
-    k.to_device(-1);
-    cos.to_device(-1);
-    sin.to_device(-1);
+    q.to_device(-1, stream);
+    k.to_device(-1, stream);
+    cos.to_device(-1, stream);
+    sin.to_device(-1, stream);
     size_t h_max = std::max(num_q_heads, num_kv_heads);
     dim3 grid(batch, h_max);
     dim3 block(seq_len);
     if (block.x > BLOCK_OPS) block.x = BLOCK_OPS;
-    rope_apply_kernel<<<grid, block>>>(q.device_data(), k.device_data(),
+    rope_apply_kernel<<<grid, block, 0, stream>>>(q.device_data(), k.device_data(),
                                        cos.device_data(), sin.device_data(),
                                        batch, num_q_heads, num_kv_heads,
                                        seq_len, head_dim);
-    CHECK_CUDA(cudaDeviceSynchronize());
+    // CHECK_CUDA(cudaDeviceSynchronize());
     q.mark_device_dirty();
     k.mark_device_dirty();
 }
 
 // Grouped Query Attention operations
-void repeat_kv(const Tensor& x, size_t n_rep, Tensor& y) {
+void repeat_kv(const Tensor& x, size_t n_rep, Tensor& y, cudaStream_t stream) {
     size_t batch = x.size(0);
     size_t num_kv_heads = x.size(1);
     size_t seq_len = x.size(2);
     size_t head_dim = x.size(3);
     if (y.size() == 0) y = Tensor({batch, num_kv_heads * n_rep, seq_len, head_dim});
-    x.to_device(-1);
-    y.to_device(-1);
+    x.to_device(-1, stream);
+    y.to_device(-1, stream);
     size_t total = batch * num_kv_heads * n_rep * seq_len * head_dim;
     dim3 block(BLOCK_OPS);
     dim3 grid((total + block.x - 1) / block.x);
-    repeat_kv_kernel<<<grid, block>>>(x.device_data(), y.device_data(),
+    repeat_kv_kernel<<<grid, block, 0, stream>>>(x.device_data(), y.device_data(),
                                       batch, num_kv_heads, n_rep, seq_len, head_dim);
     y.mark_device_dirty();
 }
 
 // Convolution operations
-void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias, Tensor& y) {
+void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias, Tensor& y, cudaStream_t stream) {
     // x: (batch, channels, seq_len) - Conv1d format
     // weight: (channels, 1, kernel_size) - grouped conv weights
     // bias: (channels) [optional]
@@ -764,14 +785,14 @@ void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias, Te
     size_t seq_len = x.size(2);
     size_t kernel_size = weight.size(2);
     if (y.size() == 0) y = Tensor({batch, channels, seq_len});
-    x.to_device(-1);
-    weight.to_device(-1);
-    if (bias) bias->to_device(-1);
-    y.to_device(-1);
+    x.to_device(-1, stream);
+    weight.to_device(-1, stream);
+    if (bias) bias->to_device(-1, stream);
+    y.to_device(-1, stream);
     size_t total = batch * channels * seq_len;
     dim3 block(BLOCK_OPS);
     dim3 grid((total + block.x - 1) / block.x);
-    causal_conv1d_kernel<<<grid, block>>>(x.device_data(), weight.device_data(),
+    causal_conv1d_kernel<<<grid, block, 0, stream>>>(x.device_data(), weight.device_data(),
                                           bias ? bias->device_data() : nullptr,
                                           y.device_data(), batch, channels, seq_len, kernel_size);
     y.mark_device_dirty();
@@ -783,28 +804,28 @@ void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias, Te
 
 // Reshape from (batch*seq, num_heads*head_dim) to (batch, num_heads, seq, head_dim)
 void reshape_to_heads(const Tensor& in, Tensor& out,
-                      size_t batch, size_t seq_len, size_t num_heads, size_t head_dim) {
+                      size_t batch, size_t seq_len, size_t num_heads, size_t head_dim, cudaStream_t stream) {
     if (out.size() == 0) out = Tensor({batch, num_heads, seq_len, head_dim});
-    in.to_device(-1);
-    out.to_device(-1);
+    in.to_device(-1, stream);
+    out.to_device(-1, stream);
     size_t total = batch * num_heads * seq_len * head_dim;
     dim3 block(BLOCK_OPS);
     dim3 grid((total + block.x - 1) / block.x);
-    reshape_to_heads_kernel<<<grid, block>>>(in.device_data(), out.device_data(),
+    reshape_to_heads_kernel<<<grid, block, 0, stream>>>(in.device_data(), out.device_data(),
                                               batch, seq_len, num_heads, head_dim);
     out.mark_device_dirty();
 }
 
 // Reshape from (batch, num_heads, seq, head_dim) to (batch*seq, num_heads*head_dim)
 void reshape_from_heads(const Tensor& in, Tensor& out,
-                        size_t batch, size_t seq_len, size_t num_heads, size_t head_dim) {
+                        size_t batch, size_t seq_len, size_t num_heads, size_t head_dim, cudaStream_t stream) {
     if (out.size() == 0) out = Tensor({batch * seq_len, num_heads * head_dim});
-    in.to_device(-1);
-    out.to_device(-1);
+    in.to_device(-1, stream);
+    out.to_device(-1, stream);
     size_t total = batch * seq_len * num_heads * head_dim;
     dim3 block(BLOCK_OPS);
     dim3 grid((total + block.x - 1) / block.x);
-    reshape_from_heads_kernel<<<grid, block>>>(in.device_data(), out.device_data(),
+    reshape_from_heads_kernel<<<grid, block, 0, stream>>>(in.device_data(), out.device_data(),
                                                 batch, seq_len, num_heads, head_dim);
     out.mark_device_dirty();
 }
@@ -812,7 +833,7 @@ void reshape_from_heads(const Tensor& in, Tensor& out,
 // Batched scaled dot-product attention with causal mask
 // Q, K, V: (batch, num_heads, seq_len, head_dim)
 // Output: (batch, num_heads, seq_len, head_dim)
-void batched_attention(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& out, float scale) {
+void batched_attention(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& out, float scale, cudaStream_t stream) {
     size_t batch = Q.size(0);
     size_t num_heads = Q.size(1);
     size_t seq_len = Q.size(2);
@@ -820,10 +841,10 @@ void batched_attention(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor
 
     if (out.size() == 0) out = Tensor({batch, num_heads, seq_len, head_dim});
 
-    Q.to_device(-1);
-    K.to_device(-1);
-    V.to_device(-1);
-    out.to_device(-1);
+    Q.to_device(-1, stream);
+    K.to_device(-1, stream);
+    V.to_device(-1, stream);
+    out.to_device(-1, stream);
 
     // Each block handles one (batch, head) pair
     // Each thread handles multiple query positions
@@ -841,7 +862,7 @@ void batched_attention(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor
         shared_mem_size = threads_per_block * seq_len * sizeof(float);
     }
 
-    batched_attention_kernel<<<num_blocks, threads_per_block, shared_mem_size>>>(
+    batched_attention_kernel<<<num_blocks, threads_per_block, shared_mem_size, stream>>>(
         Q.device_data(), K.device_data(), V.device_data(), out.device_data(),
         batch, num_heads, seq_len, head_dim, scale);
     out.mark_device_dirty();
@@ -849,14 +870,14 @@ void batched_attention(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor
 
 // Reshape: (batch*seq, heads*dim) -> (batch, seq, heads, dim) for layernorm input
 void reshape_for_layernorm(const Tensor& in, Tensor& out,
-                           size_t batch, size_t seq_len, size_t num_heads, size_t head_dim) {
+                           size_t batch, size_t seq_len, size_t num_heads, size_t head_dim, cudaStream_t stream) {
     if (out.size() == 0) out = Tensor({batch, seq_len, num_heads, head_dim});
-    in.to_device(-1);
-    out.to_device(-1);
+    in.to_device(-1, stream);
+    out.to_device(-1, stream);
     size_t total = batch * seq_len * num_heads * head_dim;
     dim3 block(BLOCK_OPS);
     dim3 grid((total + block.x - 1) / block.x);
-    reshape_for_layernorm_kernel<<<grid, block>>>(in.device_data(), out.device_data(),
+    reshape_for_layernorm_kernel<<<grid, block, 0, stream>>>(in.device_data(), out.device_data(),
                                                    batch, seq_len, num_heads, head_dim);
     out.mark_device_dirty();
 }
@@ -864,20 +885,20 @@ void reshape_for_layernorm(const Tensor& in, Tensor& out,
 // Transpose and split: (batch*seq, 3*hidden) -> B, C, x_gate each (batch, hidden, seq)
 void transpose_split_BCx(const Tensor& in_proj_out,
                          Tensor& B, Tensor& C, Tensor& x_gate,
-                         size_t batch, size_t seq_len, size_t hidden_size) {
+                         size_t batch, size_t seq_len, size_t hidden_size, cudaStream_t stream) {
     if (B.size() == 0) B = Tensor({batch, hidden_size, seq_len});
     if (C.size() == 0) C = Tensor({batch, hidden_size, seq_len});
     if (x_gate.size() == 0) x_gate = Tensor({batch, hidden_size, seq_len});
 
-    in_proj_out.to_device(-1);
-    B.to_device(-1);
-    C.to_device(-1);
-    x_gate.to_device(-1);
+    in_proj_out.to_device(-1, stream);
+    B.to_device(-1, stream);
+    C.to_device(-1, stream);
+    x_gate.to_device(-1, stream);
 
     size_t total = batch * hidden_size * seq_len;
     dim3 block(BLOCK_OPS);
     dim3 grid((total + block.x - 1) / block.x);
-    transpose_split_BCx_kernel<<<grid, block>>>(in_proj_out.device_data(),
+    transpose_split_BCx_kernel<<<grid, block, 0, stream>>>(in_proj_out.device_data(),
                                                  B.device_data(), C.device_data(), x_gate.device_data(),
                                                  batch, seq_len, hidden_size);
     B.mark_device_dirty();
@@ -887,14 +908,14 @@ void transpose_split_BCx(const Tensor& in_proj_out,
 
 // Transpose: (batch, hidden, seq) -> (batch, seq, hidden)
 void transpose_hidden_seq(const Tensor& in, Tensor& out,
-                          size_t batch, size_t hidden_size, size_t seq_len) {
+                          size_t batch, size_t hidden_size, size_t seq_len, cudaStream_t stream) {
     if (out.size() == 0) out = Tensor({batch, seq_len, hidden_size});
-    in.to_device(-1);
-    out.to_device(-1);
+    in.to_device(-1, stream);
+    out.to_device(-1, stream);
     size_t total = batch * seq_len * hidden_size;
     dim3 block(BLOCK_OPS);
     dim3 grid((total + block.x - 1) / block.x);
-    transpose_hidden_seq_kernel<<<grid, block>>>(in.device_data(), out.device_data(),
+    transpose_hidden_seq_kernel<<<grid, block, 0, stream>>>(in.device_data(), out.device_data(),
                                                   batch, hidden_size, seq_len);
     out.mark_device_dirty();
 }
@@ -910,8 +931,8 @@ RMSNorm::RMSNorm(const std::string& weight_file) {
     weight_ = Tensor::load_from_file(weight_file);
 }
 
-void RMSNorm::forward(const Tensor& x, Tensor& y) {
-    tensor_ops::rms_norm(x, weight_, RMS_NORM_EPS, y);
+void RMSNorm::forward(const Tensor& x, Tensor& y, cudaStream_t stream) {
+    tensor_ops::rms_norm(x, weight_, RMS_NORM_EPS, y, stream);
 }
 
 // RotaryEmbedding implementation
@@ -922,11 +943,11 @@ RotaryEmbedding::RotaryEmbedding() : max_seq_len_(MAX_POSITION_EMBEDDINGS) {
                                        cos_cached_, sin_cached_);
 }
 
-void RotaryEmbedding::forward(size_t seq_len, Tensor& cos, Tensor& sin) {
+void RotaryEmbedding::forward(size_t seq_len, Tensor& cos, Tensor& sin, cudaStream_t stream) {
     // Return cached values for the given sequence length
     // cos, sin should be: (seq_len, head_dim)
 
-    cos = cos_cached_.slice(0, 0, seq_len);
-    sin = sin_cached_.slice(0, 0, seq_len);
+    cos = cos_cached_.slice(0, 0, seq_len, stream);
+    sin = sin_cached_.slice(0, 0, seq_len, stream);
 }
 

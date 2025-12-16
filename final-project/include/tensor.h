@@ -85,7 +85,7 @@ public:
     
     // Tensor operations
     Tensor transpose(int dim0, int dim1) const;
-    Tensor slice(int dim, size_t start, size_t end) const;
+    Tensor slice(int dim, size_t start, size_t end, cudaStream_t stream = 0) const;
     Tensor copy() const;
     
     // Fill operations
@@ -118,53 +118,54 @@ private:
 // Tensor operations
 namespace tensor_ops {
     // Matrix operations
-    void matmul(const Tensor& a, const Tensor& b, Tensor& c);
-    void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c); // c = a @ b^T
+    void matmul(const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t stream = 0);
+    void matmul_transposed(const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t stream = 0); // c = a @ b^T
     
     // Element-wise operations
-    void add(const Tensor& a, const Tensor& b, Tensor& c);
-    void add_scalar(const Tensor& a, float b, Tensor& c);
-    void mul(const Tensor& a, const Tensor& b, Tensor& c);
-    void mul_scalar(const Tensor& a, float b, Tensor& c);
+    void add(const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t stream = 0);
+    void add_scalar(const Tensor& a, float b, Tensor& c, cudaStream_t stream = 0);
+    void add_bias(const Tensor& x, const Tensor& bias, Tensor& y, cudaStream_t stream = 0);
+    void mul(const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t stream = 0);
+    void mul_scalar(const Tensor& a, float b, Tensor& c, cudaStream_t stream = 0);
     
     // Activation functions
-    void silu(const Tensor& x, Tensor& y); // SiLU(x) = x * sigmoid(x)
-    void sigmoid(const Tensor& x, Tensor& y);
-    void softmax(const Tensor& x, Tensor& y, int dim);
+    void silu(const Tensor& x, Tensor& y, cudaStream_t stream = 0); // SiLU(x) = x * sigmoid(x)
+    void sigmoid(const Tensor& x, Tensor& y, cudaStream_t stream = 0);
+    void softmax(const Tensor& x, Tensor& y, int dim, cudaStream_t stream = 0);
     
     // Normalization
-    void rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& y);
+    void rms_norm(const Tensor& x, const Tensor& weight, float eps, Tensor& y, cudaStream_t stream = 0);
     
     // RoPE (Rotary Position Embedding)
-    void apply_rotary_pos_emb(Tensor& q, Tensor& k, const Tensor& cos, const Tensor& sin);
+    void apply_rotary_pos_emb(Tensor& q, Tensor& k, const Tensor& cos, const Tensor& sin, cudaStream_t stream = 0);
     void compute_rope_embeddings(size_t head_dim, size_t max_seq_len, float theta, 
-                                 Tensor& cos, Tensor& sin);
+                                 Tensor& cos, Tensor& sin, cudaStream_t stream = 0);
     
     // Repeat KV for GQA (Grouped Query Attention)
-    void repeat_kv(const Tensor& x, size_t n_rep, Tensor& y);
+    void repeat_kv(const Tensor& x, size_t n_rep, Tensor& y, cudaStream_t stream = 0);
     
     // Convolution
     void causal_conv1d(const Tensor& x, const Tensor& weight, const Tensor* bias,
-                       Tensor& y);
+                       Tensor& y, cudaStream_t stream = 0);
 
     // Attention operations
     void reshape_to_heads(const Tensor& in, Tensor& out,
-                          size_t batch, size_t seq_len, size_t num_heads, size_t head_dim);
+                          size_t batch, size_t seq_len, size_t num_heads, size_t head_dim, cudaStream_t stream = 0);
     void reshape_from_heads(const Tensor& in, Tensor& out,
-                            size_t batch, size_t seq_len, size_t num_heads, size_t head_dim);
-    void batched_attention(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& out, float scale);
+                            size_t batch, size_t seq_len, size_t num_heads, size_t head_dim, cudaStream_t stream = 0);
+    void batched_attention(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& out, float scale, cudaStream_t stream = 0);
 
     // Optimized reshape/transpose operations for Attention and ShortConv
     // Reshape: (batch*seq, heads*dim) -> (batch, seq, heads, dim) for layernorm input
     void reshape_for_layernorm(const Tensor& in, Tensor& out,
-                               size_t batch, size_t seq_len, size_t num_heads, size_t head_dim);
+                               size_t batch, size_t seq_len, size_t num_heads, size_t head_dim, cudaStream_t stream = 0);
 
     // Transpose and split for ShortConv: (batch*seq, 3*hidden) -> B, C, x_gate each (batch, hidden, seq)
     void transpose_split_BCx(const Tensor& in_proj_out, 
                              Tensor& B, Tensor& C, Tensor& x_gate,
-                             size_t batch, size_t seq_len, size_t hidden_size);
+                             size_t batch, size_t seq_len, size_t hidden_size, cudaStream_t stream = 0);
 
     // Transpose: (batch, hidden, seq) -> (batch, seq, hidden)
     void transpose_hidden_seq(const Tensor& in, Tensor& out,
-                              size_t batch, size_t hidden_size, size_t seq_len);
+                              size_t batch, size_t hidden_size, size_t seq_len, cudaStream_t stream = 0);
 }

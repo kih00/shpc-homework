@@ -11,12 +11,15 @@
 // Global model loader (defined in model.cu)
 extern std::unique_ptr<ModelLoader> g_model_loader;
 
+// Global MPI rank for conditional debug output (defined in model.cu)
+extern int g_mpi_rank;
+
 class LFM2Model {
 public:
     LFM2Model(const std::string& model_file);
     
     // Forward pass
-    void forward(const std::vector<int>& input_ids, size_t batch, size_t seq_len, Tensor& logits);
+    void forward(const std::vector<int>& input_ids, size_t batch, size_t seq_len, Tensor& logits, cudaStream_t stream = 0);
     
 private:
     std::unique_ptr<ModelLoader> loader_;

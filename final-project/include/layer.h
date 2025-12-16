@@ -9,7 +9,7 @@
 class RMSNorm {
 public:
     RMSNorm(const std::string& weight_file);
-    void forward(const Tensor& x, Tensor& y);
+    void forward(const Tensor& x, Tensor& y, cudaStream_t stream = 0);
     
 private:
     Tensor weight_;
@@ -19,7 +19,7 @@ private:
 class RotaryEmbedding {
 public:
     RotaryEmbedding();
-    void forward(size_t seq_len, Tensor& cos, Tensor& sin);
+    void forward(size_t seq_len, Tensor& cos, Tensor& sin, cudaStream_t stream = 0);
     
 private:
     Tensor cos_cached_;
@@ -31,7 +31,7 @@ private:
 class MLP {
 public:
     MLP(const std::string& w1_file, const std::string& w2_file, const std::string& w3_file);
-    void forward(const Tensor& x, Tensor& y);
+    void forward(const Tensor& x, Tensor& y, cudaStream_t stream = 0);
     
 private:
     Tensor w1_;  // up projection
@@ -43,7 +43,7 @@ private:
 class SparseMoeBlock {
 public:
     SparseMoeBlock(int layer_idx);
-    void forward(const Tensor& x, Tensor& y, Tensor& router_logits);
+    void forward(const Tensor& x, Tensor& y, Tensor& router_logits, cudaStream_t stream = 0);
     
 private:
     static constexpr int EXPERT_PARALLEL_GPUS = 4;  // Single-node, fixed 4 GPU layout
@@ -53,7 +53,7 @@ private:
     Tensor expert_bias_;  // optional
     
     void route_tokens(const Tensor& router_logits, std::vector<int>& top_k_indices,
-                     std::vector<float>& top_k_weights);
+                     std::vector<float>& top_k_weights, cudaStream_t stream = 0);
 };
 
 // Multi-Head Attention
@@ -61,7 +61,7 @@ class Attention {
 public:
     Attention(int layer_idx);
     void forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
-                 const Tensor* attention_mask, Tensor& output);
+                 const Tensor* attention_mask, Tensor& output, cudaStream_t stream = 0);
     
 private:
     Tensor q_proj_;
@@ -77,7 +77,7 @@ private:
 class ShortConv {
 public:
     ShortConv(int layer_idx);
-    void forward(const Tensor& x, Tensor& y);
+    void forward(const Tensor& x, Tensor& y, cudaStream_t stream = 0);
     
 private:
     Tensor conv_weight_;
@@ -89,12 +89,12 @@ private:
     int layer_idx_;
 };
 
-// Decoder Layer
+// DecoderLayer
 class DecoderLayer {
 public:
     DecoderLayer(int layer_idx, bool is_attention_layer, int device_id);
     void forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
-                 const Tensor* attention_mask, Tensor& output);
+                 const Tensor* attention_mask, Tensor& output, cudaStream_t stream = 0);
     
     bool is_attention_layer() const { return is_attention_layer_; }
     int device_id() const { return device_id_; }
