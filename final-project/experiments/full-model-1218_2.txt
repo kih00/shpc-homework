@@ -1,0 +1,120 @@
+개선 사항
+ - buffer pool을 이용하여 통신 오버헤드 감소
+ - ShortConv에 Kernel fusion 적용
+=============================================
+ Model: LFM2-8B-A1B
+---------------------------------------------
+ Validation: ON
+ Warm-up: ON
+ Number of samples: 1024
+=============================================
+
+Initializing inputs and outputs...Done!
+Input file info:
+  Total samples: 1024
+  Sequence length: 16
+  Processing samples: 1024
+  MPI ranks: 4
+
+Loading model from /mnt/ramdisk/model.bin...Loading LFM2-8B-A1B model from /mnt/ramdisk/model.bin
+Loading model index from /mnt/ramdisk/model.bin
+  Number of tensors: 2302
+  Index loaded successfully
+Loading embeddings...
+  Embeddings shape: 65536 x 2048
+Loading 24 decoder layers...
+  Layer 0: Conv
+  Layer 1: Conv
+  Layer 2: Attention
+  Layer 3: Conv
+  Layer 4: Conv
+  Layer 5: Conv
+  Layer 6: Attention
+  Layer 7: Conv
+  Layer 8: Conv
+  Layer 9: Conv
+  Layer 10: Attention
+  Layer 11: Conv
+  Layer 12: Conv
+  Layer 13: Conv
+  Layer 14: Attention
+  Layer 15: Conv
+  Layer 16: Conv
+  Layer 17: Conv
+  Layer 18: Attention
+  Layer 19: Conv
+  Layer 20: Conv
+  Layer 21: Attention
+  Layer 22: Conv
+  Layer 23: Conv
+Loading output layers...
+  Using tied weights for LM head
+Model loaded successfully!
+Warming up...
+Forward pass: batch=256, seq_len=16
+  Layer 0: 0.368824 seconds
+  Layer 1: 0.322204 seconds
+  Layer 2: 0.636137 seconds
+  Layer 3: 0.82552 seconds
+  Layer 4: 0.790702 seconds
+  Layer 5: 0.802269 seconds
+  Layer 6: 0.79754 seconds
+  Layer 7: 0.796736 seconds
+  Layer 8: 0.774375 seconds
+  Layer 9: 0.806796 seconds
+  Layer 10: 0.851269 seconds
+  Layer 11: 0.810076 seconds
+  Layer 12: 0.826556 seconds
+  Layer 13: 0.82166 seconds
+  Layer 14: 0.787193 seconds
+  Layer 15: 0.745382 seconds
+  Layer 16: 0.807443 seconds
+  Layer 17: 0.79131 seconds
+  Layer 18: 0.752488 seconds
+  Layer 19: 0.761586 seconds
+  Layer 20: 0.742298 seconds
+  Layer 21: 0.746435 seconds
+  Layer 22: 0.782148 seconds
+  Layer 23: 0.770928 seconds
+Done!
+
+Generating (Data Parallel with 4 ranks)...
+Forward pass: batch=256, seq_len=16
+  Layer 0: 0.230312 seconds
+  Layer 1: 0.230248 seconds
+  Layer 2: 0.323991 seconds
+  Layer 3: 0.267452 seconds
+  Layer 4: 0.250485 seconds
+  Layer 5: 0.252957 seconds
+  Layer 6: 0.265443 seconds
+  Layer 7: 0.252457 seconds
+  Layer 8: 0.267778 seconds
+  Layer 9: 0.253206 seconds
+  Layer 10: 0.288721 seconds
+  Layer 11: 0.266611 seconds
+  Layer 12: 0.239458 seconds
+  Layer 13: 0.231623 seconds
+  Layer 14: 0.260515 seconds
+  Layer 15: 0.2472 seconds
+  Layer 16: 0.241165 seconds
+  Layer 17: 0.233213 seconds
+  Layer 18: 0.246836 seconds
+  Layer 19: 0.263629 seconds
+  Layer 20: 0.274105 seconds
+  Layer 21: 0.25898 seconds
+  Layer 22: 0.253072 seconds
+  Layer 23: 0.267923 seconds
+Done!
+Elapsed time: 7.946072 (sec)
+Throughput: 128.868706 (samples/sec)
+
+Saving outputs to data/outputs.bin...Done!
+===========================================================
+Validating against reference answers...
+===========================================================
+
+Comparing 1024 samples...
+Threshold: 1e-3
+
+Top-1 Prediction Accuracy: 100% (1024/1024)
+VALID
