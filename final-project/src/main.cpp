@@ -18,10 +18,10 @@ static bool run_warmup = false;
 static int num_warmup = 1;
 
 double get_time() {
-  struct timespec tv;
-  clock_gettime(CLOCK_MONOTONIC, &tv);
+    struct timespec tv;
+    clock_gettime(CLOCK_MONOTONIC, &tv);
 
-  return tv.tv_sec + tv.tv_nsec * 1e-9;
+    return tv.tv_sec + tv.tv_nsec * 1e-9;
 }
 
 // Helper function to read int32 from file
@@ -64,7 +64,7 @@ void print_help() {
 
 void parse_args(int argc, char **argv) {
     int args;
-    while ((args = getopt(argc, argv, "n:b:vwh")) != -1) {
+    while ((args = getopt(argc, argv, "n:vwh")) != -1) {
     switch (args) {
         case 'n': num_samples = atoi(optarg); break;
         case 'v': run_validation = true; break;
@@ -99,7 +99,7 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
 
-    // Set global MPI rank for conditional debug output
+    // Set global MPI rank for debug output
     g_mpi_rank = mpi_rank;
 
     parse_args(argc, argv);
@@ -121,15 +121,11 @@ int main(int argc, char* argv[]) {
     int32_t seq_length = 0;
 
     // Data Parallelism: distribute samples across MPI ranks
-    // Calculate samples per rank (handle uneven distribution)
-    int samples_per_rank = num_samples / mpi_size;
+    int n_per_rank = num_samples / mpi_size;
     int remainder = num_samples % mpi_size;
-    int local_num_samples = samples_per_rank + (mpi_rank < remainder ? 1 : 0);
+    int local_n = n_per_rank + (mpi_rank < remainder ? 1 : 0);
 
-    // Calculate offset for this rank (used for debugging if needed)
-    (void)(mpi_rank * samples_per_rank + std::min(mpi_rank, remainder));
-
-    /* Rank 0 reads input file and broadcasts metadata */
+    /* Only MPI process rank 0 has the inputs and outputs */
     if (mpi_rank == 0) fprintf(stdout, "Initializing inputs and outputs...");
 
     if (mpi_rank == 0) {
@@ -151,13 +147,14 @@ int main(int argc, char* argv[]) {
         fprintf(stdout, "  MPI ranks: %d\n", mpi_size);
         fprintf(stdout, "\n");
 
-        // Allocate pinned memory for all inputs (rank 0 only)
+        // Allocate pinned memory for all inputs (rank 0)
         CHECK_CUDA(cudaMallocHost(&inputs, num_samples * seq_length * sizeof(int)));
 
         // Read all input samples into buffer
         for (int i = 0; i < num_samples; i++) {
             std::vector<int32_t> temp_input(seq_length);
-            infile.read(reinterpret_cast<char*>(temp_input.data()), seq_length * sizeof(int32_t));
+            infile.read(reinterpret_cast<char*>(
+                temp_input.data()), seq_length * sizeof(int32_t));
 
             if (!infile && i < num_samples - 1) {
                 fprintf(stderr, "Warning: Could only read %d samples\n", i);
@@ -172,8 +169,9 @@ int main(int argc, char* argv[]) {
 
         infile.close();
 
-        // Allocate pinned memory for all outputs (rank 0 only)
-        CHECK_CUDA(cudaMallocHost(&outputs, num_samples * VOCAB_SIZE * sizeof(float)));
+        // Allocate pinned memory for all outputs (rank 0)
+        CHECK_CUDA(cudaMallocHost(
+            &outputs, num_samples * VOCAB_SIZE * sizeof(float)));
     }
 
     // Broadcast seq_length to all ranks
@@ -181,32 +179,36 @@ int main(int argc, char* argv[]) {
 
     // Allocate local input buffer for each rank
     int *local_inputs = nullptr;
-    CHECK_CUDA(cudaMallocHost(&local_inputs, local_num_samples * seq_length * sizeof(int)));
+    CHECK_CUDA(cudaMallocHost(
+        &local_inputs, local_n * seq_length * sizeof(int)));
 
-    // Scatter inputs to all ranks (using MPI_Scatterv for uneven distribution)
+    // Scatter inputs to all ranks
     std::vector<int> sendcounts(mpi_size);
     std::vector<int> displs(mpi_size);
     for (int r = 0; r < mpi_size; r++) {
-        int r_samples = samples_per_rank + (r < remainder ? 1 : 0);
+        int r_samples = n_per_rank + (r < remainder ? 1 : 0);
         sendcounts[r] = r_samples * seq_length;
-        displs[r] = (r * samples_per_rank + std::min(r, remainder)) * seq_length;
+        displs[r] = (r * n_per_rank + std::min(r, remainder)) * seq_length;
     }
 
-    MPI_Scatterv(inputs, sendcounts.data(), displs.data(), MPI_INT,
-                 local_inputs, local_num_samples * seq_length, MPI_INT,
-                 0, MPI_COMM_WORLD);
+    MPI_Scatterv(
+        inputs, sendcounts.data(), displs.data(), MPI_INT,
+        local_inputs, local_n * seq_length, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // Load model on all ranks
-    if (mpi_rank == 0) fprintf(stdout, "Loading model from %s...", model_file.c_str());
+    // Load model (all ranks)
+    if (mpi_rank == 0) fprintf(
+        stdout, "Loading model from %s...", model_file.c_str());
     LFM2Model model(model_file);
 
-    /* Warm-up on all ranks */
-    if (run_warmup && local_num_samples > 0) {
+    /* Warm-up (all ranks) */
+    if (run_warmup && local_n > 0) {
         if (mpi_rank == 0) fprintf(stdout, "Warming up...");
-        std::vector<int> warmup_input(local_inputs, local_inputs + local_num_samples * seq_length);
+        std::vector<int> warmup_input(
+            local_inputs, local_inputs + local_n * seq_length);
         Tensor warmup_logits;
         for (int i = 0; i < num_warmup; i++) {
-            model.forward(warmup_input, local_num_samples, seq_length, warmup_logits);
+            model.forward(
+                warmup_input, local_n, seq_length, warmup_logits);
         }
         if (mpi_rank == 0) fprintf(stdout, "Done!\n\n");
     }
@@ -223,7 +225,7 @@ int main(int argc, char* argv[]) {
         fflush(stdout);
     }
 
-    for (size_t i = 0; i < 4; i++) {
+    for (size_t i = 0; i < NUM_GPUS; i++) {
         CHECK_CUDA(cudaSetDevice(i));
         CHECK_CUDA(cudaDeviceSynchronize());
     }
@@ -232,29 +234,31 @@ int main(int argc, char* argv[]) {
 
     if (mpi_rank == 0) st = get_time();
 
-    /* Each rank processes its local samples */
+    /* Call the main computation (all ranks) */
     float *local_outputs = nullptr;
-    CHECK_CUDA(cudaMallocHost(&local_outputs, local_num_samples * VOCAB_SIZE * sizeof(float)));
+    CHECK_CUDA(cudaMallocHost(
+        &local_outputs, local_n * VOCAB_SIZE * sizeof(float)));
 
-    if (local_num_samples > 0) {
+    if (local_n > 0) {
         // Get input for this rank's samples
-        std::vector<int> input_ids_vec(local_inputs, local_inputs + local_num_samples * seq_length);
+        std::vector<int> input_ids_vec(
+            local_inputs, local_inputs + local_n * seq_length);
 
         // Run forward pass
         Tensor logits;
-        model.forward(input_ids_vec, local_num_samples, seq_length, logits);
+        model.forward(input_ids_vec, local_n, seq_length, logits);
 
         logits.to_host();
 
         // Copy logits to local output buffer
-        for (int b = 0; b < local_num_samples; b++) {
+        for (int b = 0; b < local_n; b++) {
             for (size_t i = 0; i < VOCAB_SIZE; i++) {
                 local_outputs[b * VOCAB_SIZE + i] = logits.at(b, i);
             }
         }
     }
 
-    for (size_t i = 0; i < 4; i++) {
+    for (size_t i = 0; i < NUM_GPUS; i++) {
         CHECK_CUDA(cudaSetDevice(i));
         CHECK_CUDA(cudaDeviceSynchronize());
     }
@@ -265,14 +269,15 @@ int main(int argc, char* argv[]) {
     std::vector<int> recvcounts(mpi_size);
     std::vector<int> recvdispls(mpi_size);
     for (int r = 0; r < mpi_size; r++) {
-        int r_samples = samples_per_rank + (r < remainder ? 1 : 0);
+        int r_samples = n_per_rank + (r < remainder ? 1 : 0);
         recvcounts[r] = r_samples * VOCAB_SIZE;
-        recvdispls[r] = (r * samples_per_rank + std::min(r, remainder)) * VOCAB_SIZE;
+        recvdispls[r] = (r * n_per_rank + std::min(r, remainder)) * VOCAB_SIZE;
     }
 
-    MPI_Gatherv(local_outputs, local_num_samples * VOCAB_SIZE, MPI_FLOAT,
-                outputs, recvcounts.data(), recvdispls.data(), MPI_FLOAT,
-                0, MPI_COMM_WORLD);
+    MPI_Gatherv(
+        local_outputs, local_n * VOCAB_SIZE, MPI_FLOAT,
+        outputs, recvcounts.data(), recvdispls.data(), MPI_FLOAT,
+        0, MPI_COMM_WORLD);
 
     if (mpi_rank == 0) {
         et = get_time();
@@ -299,7 +304,9 @@ int main(int argc, char* argv[]) {
         std::ofstream outfile(output_file, std::ios::binary);
         write_int32(outfile, num_samples);
         write_int32(outfile, VOCAB_SIZE);
-        outfile.write(reinterpret_cast<const char*>(outputs), num_samples * VOCAB_SIZE * sizeof(float));
+        outfile.write(
+            reinterpret_cast<const char*>(outputs),
+            num_samples * VOCAB_SIZE * sizeof(float));
         outfile.close();
         fprintf(stdout, "Done!\n");
 
@@ -311,7 +318,7 @@ int main(int argc, char* argv[]) {
             std::cout << "Validating against reference answers..." << std::endl;
             std::cout << "=" << std::string(58, '=') << std::endl;
             std::cout << std::endl;
-        
+
             // Read answer file header
             int32_t ans_num_samples = read_int32(ansfile);
             int32_t ans_vocab_size = read_int32(ansfile);
@@ -319,12 +326,13 @@ int main(int argc, char* argv[]) {
             // Reopen outputs.bin to read for comparison
             std::ifstream outfile_read(output_file, std::ios::binary);
             int32_t out_num_samples = read_int32(outfile_read);
-            (void)read_int32(outfile_read); // out_vocab_size - not used
-        
-            int num_compare = std::min(num_samples, std::min(ans_num_samples, out_num_samples));
+            read_int32(outfile_read);  // skip vocab_size
+
+            int num_compare = std::min(
+                num_samples, std::min(ans_num_samples, out_num_samples));
             std::cout << "Comparing " << num_compare << " samples..." << std::endl;
             std::cout << "Threshold: 1e-3" << std::endl;
-        
+
             const float THRESHOLD = 1e-3f;
             int total_values = 0;
             int mismatches = 0;
@@ -333,16 +341,16 @@ int main(int argc, char* argv[]) {
             int first_mismatch_idx = -1;
             float first_mismatch_output = 0.0f;
             float first_mismatch_answer = 0.0f;
-            
+
             for (int sample_idx = 0; sample_idx < num_compare; sample_idx++) {
                 std::vector<float> output_logits(VOCAB_SIZE);
                 std::vector<float> answer_logits(VOCAB_SIZE);
-                
+
                 // Read logits from both files
                 for (size_t i = 0; i < VOCAB_SIZE; i++) {
                     output_logits[i] = read_float(outfile_read);
                 }
-                
+
                 for (int32_t i = 0; i < ans_vocab_size; i++) {
                     if (i < static_cast<int32_t>(VOCAB_SIZE)) {
                         answer_logits[i] = read_float(ansfile);
@@ -350,12 +358,12 @@ int main(int argc, char* argv[]) {
                         read_float(ansfile); // Skip extra values
                     }
                 }
-                
+
                 // Compare values
                 for (size_t i = 0; i < VOCAB_SIZE; i++) {
                     float diff = std::abs(output_logits[i] - answer_logits[i]);
                     total_values++;
-                    
+
                     if (diff > THRESHOLD) {
                         if (first_mismatch_idx == -1) {
                             first_mismatch_idx = sample_idx * VOCAB_SIZE + i;
@@ -365,26 +373,31 @@ int main(int argc, char* argv[]) {
                         mismatches++;
                     }
                 }
-                
+
                 // Check top-1 prediction
-                int top1_output = std::max_element(output_logits.begin(), output_logits.end()) - output_logits.begin();
-                int top1_answer = std::max_element(answer_logits.begin(), answer_logits.end()) - answer_logits.begin();
-                
+                int top1_output =
+                    std::max_element(output_logits.begin(), output_logits.end())
+                    - output_logits.begin();
+                int top1_answer =
+                    std::max_element(answer_logits.begin(), answer_logits.end())
+                    - answer_logits.begin();
+
                 if (top1_output == top1_answer) {
                     top1_matches++;
                 }
             }
-            
+
             outfile_read.close();
             ansfile.close();
-            
+
             std::cout << std::endl;
-            
+
             // Print top-1 accuracy
             float top1_accuracy = (float)top1_matches / num_compare * 100.0f;
             std::cout << "Top-1 Prediction Accuracy: " << top1_accuracy << "% " 
-                      << "(" << top1_matches << "/" << num_compare << ")" << std::endl;
-            
+                      << "(" << top1_matches << "/" << num_compare << ")"
+                      << std::endl;
+
             // Final verdict
             if (mismatches == 0) {
                 fprintf(stdout, "VALID\n");
@@ -395,7 +408,8 @@ int main(int argc, char* argv[]) {
                     int vocab_idx = first_mismatch_idx % VOCAB_SIZE;
                     fprintf(stdout, "First mismatch at sample[%d], vocab[%d] "
                             "(output[%d]=%.6f <-> answer[%d]=%.6f)\n",
-                            sample_num, vocab_idx, first_mismatch_idx, first_mismatch_output,
+                            sample_num, vocab_idx, first_mismatch_idx,
+                            first_mismatch_output,
                             first_mismatch_idx, first_mismatch_answer);
                 }
                 fprintf(stdout, "Total mismatches: %d/%d\n", mismatches, total_values);

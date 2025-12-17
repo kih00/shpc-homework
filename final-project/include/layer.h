@@ -5,6 +5,8 @@
 #include <vector>
 #include <memory>
 
+constexpr int NUM_GPUS = 4;
+
 // RMSNorm Layer
 class RMSNorm {
 public:
@@ -30,13 +32,15 @@ private:
 // MLP Layer (Feed-Forward Network)
 class MLP {
 public:
-    MLP(const std::string& w1_file, const std::string& w2_file, const std::string& w3_file);
+    MLP(const std::string& w1_file, const std::string& w2_file, const std::string& w3_file, int device_id = 0);
+    ~MLP();
     void forward(const Tensor& x, Tensor& y, cudaStream_t stream = 0);
     
 private:
     Tensor w1_;  // up projection
     Tensor w3_;  // gate projection
     Tensor w2_;  // down projection
+    int device_id_;
 };
 
 // Sparse MoE Block
@@ -46,9 +50,8 @@ public:
     void forward(const Tensor& x, Tensor& y, Tensor& router_logits, cudaStream_t stream = 0);
     
 private:
-    static constexpr int EXPERT_PARALLEL_GPUS = 4;  // Single-node, fixed 4 GPU layout
     Tensor gate_;  // router
-    std::vector<MLP> experts_;
+    std::vector<std::unique_ptr<MLP>> experts_;
     std::vector<int> expert_devices_;
     Tensor expert_bias_;  // optional
     
@@ -60,6 +63,7 @@ private:
 class Attention {
 public:
     Attention(int layer_idx);
+    ~Attention();
     void forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
                  const Tensor* attention_mask, Tensor& output, cudaStream_t stream = 0);
     

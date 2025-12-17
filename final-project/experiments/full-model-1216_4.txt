@@ -1,4 +1,9 @@
-
+[개선 사항]
+- matmul_transposed_kernel 구현 최적화
+  - 메모리 레이아웃 수정 (coalesced access)
+  - float4 vertorization
+  - register tiling
+- 뒤에 전체적인 최적화 기법 정리됨
 =============================================
  Model: LFM2-8B-A1B
 ---------------------------------------------
@@ -116,3 +121,60 @@ Threshold: 1e-3
 
 Top-1 Prediction Accuracy: 100% (512/512)
 VALID
+
+-----
+
+1. CUDA Stream 및 비동기 연산
+
+  - 모든 주요 함수에 cudaStream_t 파라미터 전달
+  - cudaMemcpyAsync로 비동기 메모리 전송 (tensor.cu)
+  - MoE 병렬 실행을 위한 Non-blocking 스트림 생성 (model.cu:397)
+
+  2. Pinned Memory (고정 메모리)
+
+  - cudaMallocHost로 입출력 버퍼 고정 메모리 할당 (main.cpp:155, 176, 184, 237)
+  - Host-Device 전송 속도 향상
+
+  3. Kernel/Operator Fusion
+
+  - Transpose + Split 융합 (layer.cu:514-535): transpose_split_BCx_kernel
+  - Softmax with warp-level reduction (layer.cu:236-298): max, exp, sum을 warp shuffle로 한 번에 처리
+  - RMS Norm with block-level reduction (layer.cu:303-355)
+  - Embedding lookup (layer.cu:137-152): GPU에서 row gathering
+
+  4. Multi-GPU 지원
+
+  - Device-to-device 메모리 전송 (tensor.cu:542)
+  - Expert Parallelism: 32개 expert를 4개 GPU에 round-robin 분산 (model.cu:263-265)
+  - OpenMP로 expert 실행 병렬화 (model.cu:391-438)
+
+  5. MPI Data Parallelism
+
+  - MPI_Scatterv로 배치 분산 (main.cpp:195-197)
+  - MPI_Gatherv로 결과 수집 (main.cpp:273-275)
+  - 각 rank가 독립 샘플 처리
+
+  6. Shared Memory 최적화
+
+  - Tiled matmul: 32x32 블록 타일링 (layer.cu:28-72, 76-182)
+  - Softmax/RMS norm에서 warp reduction용 shared memory 사용
+
+  7. Tiling & Loop Unrolling
+
+  - TM=4, TN=4, BK=32 레지스터 타일링 (layer.cu:76-182)
+  - #pragma unroll 적용 (layer.cu:61, 151-161)
+
+  8. Coalesced Memory Access
+
+  - Float4 벡터 로드 (layer.cu:110-146): 스레드당 4개 float 로드
+  - Row-major 접근 패턴 유지
+
+  9. Warp-Level 최적화
+
+  - __shfl_down_sync로 warp shuffle reduction (layer.cu:247-249, 277-279)
+  - Top-k routing에 warp parallelism 적용 (model.cu:26-91)
+
+  10. Host-Device 동기화 관리
+
+  - device_dirty/host_dirty 플래그로 최신 데이터 추적 (tensor.h:96-98)
+  - Lazy synchronization: 필요할 때만 동기화
