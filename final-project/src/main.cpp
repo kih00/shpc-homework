@@ -113,8 +113,6 @@ int main(int argc, char* argv[]) {
     // INITIALIZATION                                                 //
     ////////////////////////////////////////////////////////////////////
 
-    cudaProfilerStart(); // 제출 시 지우기
-
     int *inputs = nullptr;
     float *outputs = nullptr;
     int32_t total_samples = 0;
@@ -219,6 +217,8 @@ int main(int argc, char* argv[]) {
     ////////////////////////////////////////////////////////////////////
 
     double st = 0.0, et = 0.0;
+
+    cudaProfilerStart(); // 제출 시 지우기
 
     if (mpi_rank == 0) {
         fprintf(stdout, "Generating (Data Parallel with %d ranks)...", mpi_size);

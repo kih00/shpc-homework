@@ -164,4 +164,9 @@ namespace tensor_ops {
     // Transpose: (batch, hidden, seq) -> (batch, seq, hidden)
     void transpose_hidden_seq(const Tensor& in, Tensor& out,
                               size_t batch, size_t hidden_size, size_t seq_len, cudaStream_t stream = 0);
+
+    // Fused ShortConv: transpose_split + B*gate + conv1d + C*conv + transpose
+    void shortconv_fused(const Tensor& in_proj_out, const Tensor& conv_weight, const Tensor* conv_bias,
+                         Tensor& out, size_t batch, size_t seq_len, size_t hidden_size,
+                         size_t kernel_size, cudaStream_t stream = 0);
 }

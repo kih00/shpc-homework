@@ -15,6 +15,9 @@ std::unique_ptr<ModelLoader> g_model_loader;
 // Global MPI rank for conditional debug output (set from main.cpp)
 int g_mpi_rank = 0;
 
+// Global buffer pool (definition)
+BufferPool g_buffer_pool;
+
 // Debug print macro - only rank 0 prints
 #define DEBUG_PRINT(x) do { if (g_mpi_rank == 0) { std::cout << x; } } while(0)
 #define DEBUG_PRINTLN(x) do { if (g_mpi_rank == 0) { std::cout << x << std::endl; } } while(0)
@@ -168,6 +171,122 @@ __global__ void extract_last_token_kernel(
         output[b * hidden_size + h] =
             input[(b * seq_len + (seq_len - 1)) * hidden_size + h];
     }
+}
+
+// =============================================================================
+// BufferPool Implementation
+// =============================================================================
+BufferPool::BufferPool()
+    : initialized_(false), device_id_(0), max_batch_(0), max_seq_len_(0) {}
+
+BufferPool::~BufferPool() {
+    cleanup();
+}
+
+void BufferPool::init(size_t max_batch, size_t max_seq_len, int device_id) {
+    if (initialized_) return;
+
+    device_id_ = device_id;
+    max_batch_ = max_batch;
+    max_seq_len_ = max_seq_len;
+
+    CHECK_CUDA(cudaSetDevice(device_id_));
+
+    size_t bs = max_batch * max_seq_len;
+    size_t hidden = HIDDEN_SIZE;
+    size_t num_heads = NUM_ATTENTION_HEADS;
+    size_t num_kv_heads = NUM_KEY_VALUE_HEADS;
+    size_t head_dim = HEAD_DIM;
+    size_t intermediate = INTERMEDIATE_SIZE;
+
+    // Attention buffers
+    q_proj_out = Tensor({bs, num_heads * head_dim});
+    k_proj_out = Tensor({bs, num_kv_heads * head_dim});
+    v_proj_out = Tensor({bs, num_kv_heads * head_dim});
+    q_reshaped = Tensor({max_batch, max_seq_len, num_heads, head_dim});
+    k_reshaped = Tensor({max_batch, max_seq_len, num_kv_heads, head_dim});
+    v_reshaped = Tensor({max_batch, max_seq_len, num_kv_heads, head_dim});
+    q_normed = Tensor({max_batch, max_seq_len, num_heads, head_dim});
+    k_normed = Tensor({max_batch, max_seq_len, num_kv_heads, head_dim});
+    q_heads = Tensor({max_batch, num_heads, max_seq_len, head_dim});
+    k_heads = Tensor({max_batch, num_kv_heads, max_seq_len, head_dim});
+    v_heads = Tensor({max_batch, num_kv_heads, max_seq_len, head_dim});
+    k_repeated = Tensor({max_batch, num_heads, max_seq_len, head_dim});
+    v_repeated = Tensor({max_batch, num_heads, max_seq_len, head_dim});
+    attn_output = Tensor({max_batch, num_heads, max_seq_len, head_dim});
+    attn_flat = Tensor({bs, hidden});
+    attn_proj_out = Tensor({bs, hidden});
+
+    // ShortConv buffers
+    conv_in_proj = Tensor({bs, 3 * hidden});
+    conv_B = Tensor({max_batch, hidden, max_seq_len});
+    conv_C = Tensor({max_batch, hidden, max_seq_len});
+    conv_x_gate = Tensor({max_batch, hidden, max_seq_len});
+    conv_Bx = Tensor({max_batch, hidden, max_seq_len});
+    conv_out = Tensor({max_batch, hidden, max_seq_len});
+    conv_y_pre = Tensor({max_batch, hidden, max_seq_len});
+    conv_transposed = Tensor({max_batch, max_seq_len, hidden});
+    conv_proj_out = Tensor({bs, hidden});
+
+    // MLP buffers (for dense layers)
+    mlp_gate = Tensor({bs, intermediate});
+    mlp_gate_silu = Tensor({bs, intermediate});
+    mlp_up = Tensor({bs, intermediate});
+    mlp_hidden = Tensor({bs, intermediate});
+    mlp_out = Tensor({bs, hidden});
+
+    // DecoderLayer buffers
+    layer_normed_input = Tensor({max_batch, max_seq_len, hidden});
+    layer_attn_out = Tensor({max_batch, max_seq_len, hidden});
+    layer_hidden = Tensor({max_batch, max_seq_len, hidden});
+    layer_normed_hidden = Tensor({max_batch, max_seq_len, hidden});
+
+    // Pre-allocate on device
+    q_proj_out.to_device(device_id_);
+    k_proj_out.to_device(device_id_);
+    v_proj_out.to_device(device_id_);
+    q_reshaped.to_device(device_id_);
+    k_reshaped.to_device(device_id_);
+    v_reshaped.to_device(device_id_);
+    q_normed.to_device(device_id_);
+    k_normed.to_device(device_id_);
+    q_heads.to_device(device_id_);
+    k_heads.to_device(device_id_);
+    v_heads.to_device(device_id_);
+    k_repeated.to_device(device_id_);
+    v_repeated.to_device(device_id_);
+    attn_output.to_device(device_id_);
+    attn_flat.to_device(device_id_);
+    attn_proj_out.to_device(device_id_);
+
+    conv_in_proj.to_device(device_id_);
+    conv_B.to_device(device_id_);
+    conv_C.to_device(device_id_);
+    conv_x_gate.to_device(device_id_);
+    conv_Bx.to_device(device_id_);
+    conv_out.to_device(device_id_);
+    conv_y_pre.to_device(device_id_);
+    conv_transposed.to_device(device_id_);
+    conv_proj_out.to_device(device_id_);
+
+    mlp_gate.to_device(device_id_);
+    mlp_gate_silu.to_device(device_id_);
+    mlp_up.to_device(device_id_);
+    mlp_hidden.to_device(device_id_);
+    mlp_out.to_device(device_id_);
+
+    layer_normed_input.to_device(device_id_);
+    layer_attn_out.to_device(device_id_);
+    layer_hidden.to_device(device_id_);
+    layer_normed_hidden.to_device(device_id_);
+
+    initialized_ = true;
+}
+
+void BufferPool::cleanup() {
+    if (!initialized_) return;
+    // Tensors will be automatically cleaned up by their destructors
+    initialized_ = false;
 }
 
 // ============================================================================
@@ -611,35 +730,39 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
     CHECK_CUDA(cudaStreamWaitEvent(stream_k, event_main_ready, 0));
     CHECK_CUDA(cudaStreamWaitEvent(stream_v, event_main_ready, 0));
 
-    // Project Q, K, V (multi-stream)
-    Tensor q_proj_out({batch * seq_len, NUM_ATTENTION_HEADS * HEAD_DIM});
-    Tensor k_proj_out({batch * seq_len, NUM_KEY_VALUE_HEADS * HEAD_DIM});
-    Tensor v_proj_out({batch * seq_len, NUM_KEY_VALUE_HEADS * HEAD_DIM});
+    // Use buffer pool for intermediate tensors
+    Tensor& q_proj_out = g_buffer_pool.q_proj_out;
+    Tensor& k_proj_out = g_buffer_pool.k_proj_out;
+    Tensor& v_proj_out = g_buffer_pool.v_proj_out;
+    Tensor& q_reshaped = g_buffer_pool.q_reshaped;
+    Tensor& k_reshaped = g_buffer_pool.k_reshaped;
+    Tensor& v_reshaped = g_buffer_pool.v_reshaped;
+    Tensor& q_normed = g_buffer_pool.q_normed;
+    Tensor& k_normed = g_buffer_pool.k_normed;
+    Tensor& q = g_buffer_pool.q_heads;
+    Tensor& k = g_buffer_pool.k_heads;
+    Tensor& v = g_buffer_pool.v_heads;
+    Tensor& k_repeated = g_buffer_pool.k_repeated;
+    Tensor& v_repeated = g_buffer_pool.v_repeated;
+    Tensor& attn_out = g_buffer_pool.attn_output;
+    Tensor& attn_flat = g_buffer_pool.attn_flat;
+    Tensor& output_flat = g_buffer_pool.attn_proj_out;
 
+    // Project Q, K, V (multi-stream)
     tensor_ops::matmul_transposed(x_flat, q_proj_, q_proj_out, stream);
     tensor_ops::matmul_transposed(x_flat, k_proj_, k_proj_out, stream_k);
     tensor_ops::matmul_transposed(x_flat, v_proj_, v_proj_out, stream_v);
 
-    // Reshape to (batch, num_heads, seq, head_dim) for layernorm (multi-stream)
-    Tensor q_reshaped({batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM});
-    Tensor k_reshaped({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
-    Tensor v_reshaped({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
-
+    // Reshape to (batch, seq, num_heads, head_dim) for layernorm (multi-stream)
     tensor_ops::reshape_for_layernorm(q_proj_out, q_reshaped, batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM, stream);
     tensor_ops::reshape_for_layernorm(k_proj_out, k_reshaped, batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM, stream_k);
     tensor_ops::reshape_for_layernorm(v_proj_out, v_reshaped, batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM, stream_v);
 
     // Apply layernorm to Q and K (normalizes over last dim = head_dim)
-    Tensor q_normed({batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM});
-    Tensor k_normed({batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
     q_layernorm_->forward(q_reshaped, q_normed, stream);
     k_layernorm_->forward(k_reshaped, k_normed, stream_k);
 
     // Transpose to (batch, num_heads, seq_len, head_dim) for attention
-    Tensor q({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
-    Tensor k({batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
-    Tensor v({batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
-
     tensor_ops::reshape_to_heads(
         q_normed.view({batch * seq_len, NUM_ATTENTION_HEADS * HEAD_DIM}),
         q, batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM, stream);
@@ -661,28 +784,29 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
     tensor_ops::apply_rotary_pos_emb(q, k, cos, sin, stream);
 
     // Repeat K, V for GQA
-    Tensor k_repeated({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
-    Tensor v_repeated({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
     tensor_ops::repeat_kv(k, NUM_KEY_VALUE_GROUPS, k_repeated, stream);
-    
+
     // Wait for V to be ready
     CHECK_CUDA(cudaStreamWaitEvent(stream, event_v_done, 0));
     tensor_ops::repeat_kv(v, NUM_KEY_VALUE_GROUPS, v_repeated, stream);
 
     // Compute attention
     float scale = 1.0f / std::sqrt((float)HEAD_DIM);
-    Tensor attn_output({batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
-    tensor_ops::batched_attention(q, k_repeated, v_repeated, attn_output, scale, stream);
+    tensor_ops::batched_attention(q, k_repeated, v_repeated, attn_out, scale, stream);
 
     // Reshape and project output
-    Tensor attn_flat({batch * seq_len, hidden_size});
-    tensor_ops::reshape_from_heads(attn_output, attn_flat, batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM, stream);
-
-    Tensor output_flat({batch * seq_len, hidden_size});
+    tensor_ops::reshape_from_heads(attn_out, attn_flat, batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM, stream);
     tensor_ops::matmul_transposed(attn_flat, o_proj_, output_flat, stream);
 
-    output_flat.reshape({batch, seq_len, hidden_size});
-    output = std::move(output_flat);
+    // Copy result to output buffer
+    // If output is already allocated (from buffer pool), use it directly
+    if (output.size() == 0) {
+        output = Tensor({batch, seq_len, hidden_size});
+        output.to_device(dev, stream);
+    }
+    CHECK_CUDA(cudaMemcpyAsync(output.device_data(), output_flat.device_data(),
+               batch * seq_len * hidden_size * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+    output.mark_device_dirty();
 }
 
 // ShortConv implementation
@@ -717,18 +841,20 @@ ShortConv::ShortConv(int layer_idx) : layer_idx_(layer_idx) {
 
 void ShortConv::forward(const Tensor& x, Tensor& y, cudaStream_t stream) {
     // x: (batch, seq_len, hidden_size)
-    // Python: BCx = self.in_proj(x).transpose(-1, -2)
-    // Result: (batch, 3*hidden_size, seq_len) for Conv1d
-
     size_t batch = x.size(0);
     size_t seq_len = x.size(1);
     size_t hidden_size = x.size(2);
+    size_t kernel_size = conv_weight_.size(2);
 
     // Flatten for matmul
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
 
+    // Use buffer pool for intermediate tensors
+    Tensor& in_proj_out = g_buffer_pool.conv_in_proj;
+    Tensor& conv_out = g_buffer_pool.conv_transposed;  // (batch, seq, hidden)
+    Tensor& y_flat = g_buffer_pool.conv_proj_out;
+
     // in_proj: (b*s, hidden) @ (3*hidden, hidden)^T -> (b*s, 3*hidden)
-    Tensor in_proj_out({batch * seq_len, 3 * hidden_size});
     tensor_ops::matmul_transposed(x_flat, in_proj_weight_, in_proj_out, stream);
 
     // Add bias if present
@@ -736,45 +862,32 @@ void ShortConv::forward(const Tensor& x, Tensor& y, cudaStream_t stream) {
         tensor_ops::add_bias(in_proj_out, in_proj_bias_, in_proj_out, stream);
     }
 
-    // Reshape, transpose & split: (b*s, 3*hidden) -> B, C, x_gate (b, hidden, s)
-    Tensor B({batch, hidden_size, seq_len});
-    Tensor C({batch, hidden_size, seq_len});
-    Tensor x_gate({batch, hidden_size, seq_len});
-    tensor_ops::transpose_split_BCx(
-        in_proj_out, B, C, x_gate, batch, seq_len, hidden_size, stream);
-
-    // Bx = B * x_gate (element-wise)
-    Tensor Bx({batch, hidden_size, seq_len});
-    tensor_ops::mul(B, x_gate, Bx, stream);
-
-    // Apply causal conv1d on Bx (expects: batch, channels, seq_len)
-    Tensor conv_out({batch, hidden_size, seq_len});
-    tensor_ops::causal_conv1d(
-        Bx, conv_weight_,
-        USE_CONV_BIAS ? &conv_bias_ : nullptr, conv_out, stream);
-
-    // y_pre = C * conv_out (element-wise)
-    Tensor y_pre({batch, hidden_size, seq_len});
-    tensor_ops::mul(C, conv_out, y_pre, stream);
-
-    // Transpose back: (b, hidden, s) -> (b, s, hidden)
-    Tensor y_pre_transposed({batch, seq_len, hidden_size});
-    tensor_ops::transpose_hidden_seq(
-        y_pre, y_pre_transposed, batch, hidden_size, seq_len, stream);
+    // Fused: transpose_split + B*gate + conv1d + C*conv + transpose
+    // Output: (batch, seq, hidden) - ready for out_proj
+    tensor_ops::shortconv_fused(
+        in_proj_out, conv_weight_,
+        USE_CONV_BIAS ? &conv_bias_ : nullptr,
+        conv_out, batch, seq_len, hidden_size, kernel_size, stream);
 
     // out_proj: (b*s, hidden) @ (hidden, hidden)^T -> (b*s, hidden)
-    Tensor y_pre_flat = y_pre_transposed.view({batch * seq_len, hidden_size});
-    Tensor y_flat({batch * seq_len, hidden_size});
-    tensor_ops::matmul_transposed(y_pre_flat, out_proj_weight_, y_flat, stream);
+    Tensor conv_flat = conv_out.view({batch * seq_len, hidden_size});
+    tensor_ops::matmul_transposed(
+        conv_flat, out_proj_weight_, y_flat, stream);
 
     // Add bias if present
     if (USE_CONV_BIAS && out_proj_bias_.size() > 0) {
         tensor_ops::add_bias(y_flat, out_proj_bias_, y_flat, stream);
     }
 
-    // Reshape back to (batch, seq_len, hidden_size)
-    y_flat.reshape({batch, seq_len, hidden_size});
-    y = std::move(y_flat);
+    // Copy result to output buffer
+    if (y.size() == 0) {
+        y = Tensor({batch, seq_len, hidden_size});
+        y.to_device(0, stream);
+    }
+    CHECK_CUDA(cudaMemcpyAsync(y.device_data(), y_flat.device_data(),
+               batch * seq_len * hidden_size * sizeof(float),
+               cudaMemcpyDeviceToDevice, stream));
+    y.mark_device_dirty();
 }
 
 // DecoderLayer implementation
@@ -815,12 +928,21 @@ DecoderLayer::DecoderLayer(
 void DecoderLayer::forward(
     const Tensor& x, const Tensor& cos, const Tensor& sin,
     const Tensor* attention_mask, Tensor& output, cudaStream_t stream) {
+
+    size_t batch = x.size(0);
+    size_t seq_len = x.size(1);
+    size_t hidden_size = x.size(2);
+
+    // Use buffer pool for intermediate tensors
+    Tensor& normed_input = g_buffer_pool.layer_normed_input;
+    Tensor& attn_output = g_buffer_pool.layer_attn_out;
+    Tensor& hidden_states = g_buffer_pool.layer_hidden;
+    Tensor& normed_hidden = g_buffer_pool.layer_normed_hidden;
+
     // Input norm
-    Tensor normed_input(x.shape());
     input_layernorm_->forward(x, normed_input, stream);
-    
+
     // Attention or Conv
-    Tensor attn_output(x.shape());
     if (is_attention_layer_) {
         self_attn_->forward(
             normed_input, cos, sin, attention_mask, attn_output, stream);
@@ -828,15 +950,13 @@ void DecoderLayer::forward(
         short_conv_->forward(
             normed_input, attn_output, stream);
     }
-    
+
     // Residual connection
-    Tensor hidden_states(x.shape());
     tensor_ops::add(x, attn_output, hidden_states, stream);
-    
+
     // Post attention norm
-    Tensor normed_hidden(x.shape());
     post_attention_layernorm_->forward(hidden_states, normed_hidden, stream);
-    
+
     // MoE block or dense MLP
     Tensor ffn_output;
     if (moe_block_) {
@@ -847,8 +967,10 @@ void DecoderLayer::forward(
         // Dense layer (layers 0-1)
         dense_mlp_->forward(normed_hidden, ffn_output, stream);
     }
-    
-    // Residual connection
+
+    // Residual connection - output needs to be a new tensor for caller
+    output = Tensor({batch, seq_len, hidden_size});
+    output.to_device(0, stream);
     tensor_ops::add(hidden_states, ffn_output, output, stream);
 }
 
@@ -932,6 +1054,11 @@ void LFM2Model::forward(const std::vector<int>& input_ids, size_t batch, size_t 
     }
 
     DEBUG_PRINTLN("\nForward pass: batch=" << batch << ", seq_len=" << seq_len);
+
+    // Initialize buffer pool if not already done (or if dimensions changed)
+    if (!g_buffer_pool.is_initialized()) {
+        g_buffer_pool.init(batch, seq_len, 0);
+    }
 
     size_t num_tokens = batch * seq_len;
 

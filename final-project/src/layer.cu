@@ -575,6 +575,64 @@ __global__ void transpose_hidden_seq_kernel(
     out[idx] = in[in_idx];
 }
 
+// =============================================================================
+// Fused ShortConv Kernel
+// Combines: transpose_split_BCx + mul(B*gate) + conv1d + mul(C*conv) + transpose
+// Input: in_proj_out (bs, 3*hidden)
+// Output: y_out (batch, seq, hidden) - ready for out_proj
+// =============================================================================
+__global__ void shortconv_fused_kernel(
+    const float* __restrict__ in_proj_out,  // (batch*seq, 3*hidden)
+    const float* __restrict__ conv_w,       // (hidden, ksz)
+    const float* __restrict__ conv_bias,    // (hidden) or nullptr
+    float* __restrict__ out,                // (batch, seq, hidden)
+    size_t batch, size_t seq_len, size_t hidden_size, size_t ksz) {
+
+    // Output layout: (batch, seq, hidden)
+    // Each thread computes one output element [b, s, h]
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = batch * seq_len * hidden_size;
+    if (idx >= total) return;
+
+    // Decode output position [b, s, h]
+    size_t h = idx % hidden_size;
+    size_t s = (idx / hidden_size) % seq_len;
+    size_t b = idx / (hidden_size * seq_len);
+
+    // Read C value from in_proj_out
+    // in_proj_out layout: (batch*seq, 3*hidden) where [B, C, x_gate] are interleaved
+    // For position (b, s): base = (b * seq_len + s) * 3 * hidden
+    // B at offset h, C at offset h + hidden, x_gate at offset h + 2*hidden
+    size_t in_base = (b * seq_len + s) * 3 * hidden_size;
+    float C_val = in_proj_out[in_base + h + hidden_size];
+
+    // Compute conv1d output for this position
+    // conv_out[b, h, s] = sum_{k=0}^{ksz-1} Bx[b, h, s-(ksz-1)+k] * conv_w[h, k] + bias[h]
+    // where Bx[b, h, pos] = B[b, h, pos] * x_gate[b, h, pos]
+    float conv_sum = 0.0f;
+
+    #pragma unroll
+    for (size_t k = 0; k < ksz; ++k) {
+        int input_pos = (int)s - ((int)ksz - 1) + (int)k;
+        if (input_pos >= 0) {
+            // Read B and x_gate for input_pos
+            size_t in_pos_base = (b * seq_len + input_pos) * 3 * hidden_size;
+            float B_val = in_proj_out[in_pos_base + h];
+            float gate_val = in_proj_out[in_pos_base + h + 2 * hidden_size];
+            float Bx_val = B_val * gate_val;
+            conv_sum += Bx_val * conv_w[h * ksz + k];
+        }
+    }
+
+    // Add bias if present
+    if (conv_bias != nullptr) {
+        conv_sum += conv_bias[h];
+    }
+
+    // Final output: y_pre = C * conv_out (already in correct layout for out_proj)
+    out[idx] = C_val * conv_sum;
+}
+
 // Batched Scaled Dot-Product Attention with Causal Mask
 __global__ void batched_attention_kernel(
     const float* Q, const float* K, const float* V, float* Out,
@@ -1102,6 +1160,39 @@ void transpose_hidden_seq(
     transpose_hidden_seq_kernel<<<grid, block, 0, stream>>>(
         in.device_data(), out.device_data(),
         batch, hidden_size, seq_len);
+
+    out.mark_device_dirty();
+}
+
+// Fused ShortConv operation
+// Combines: transp_split_BCx + mul(B*gate) + conv1d + mul(C*conv) + transp
+void shortconv_fused(
+    const Tensor& in_proj_out, const Tensor& conv_weight,
+    const Tensor* conv_bias, Tensor& out,
+    size_t batch, size_t seq_len, size_t hidden_size, size_t kernel_size,
+    cudaStream_t stream) {
+    // in_proj_out: (batch*seq, 3*hidden)
+    // conv_weight: (hidden, 1, ksz)
+    // conv_bias: (hidden) or nullptr
+    // out: (batch, seq, hidden)
+
+    if (out.size() == 0) out = Tensor({batch, seq_len, hidden_size});
+
+    in_proj_out.to_device(-1, stream);
+    conv_weight.to_device(-1, stream);
+    if (conv_bias) conv_bias->to_device(-1, stream);
+    out.to_device(-1, stream);
+
+    size_t total = batch * seq_len * hidden_size;
+    dim3 block(BLOCK_OPS);
+    dim3 grid((total + block.x - 1) / block.x);
+
+    shortconv_fused_kernel<<<grid, block, 0, stream>>>(
+        in_proj_out.device_data(),
+        conv_weight.device_data(),
+        conv_bias ? conv_bias->device_data() : nullptr,
+        out.device_data(),
+        batch, seq_len, hidden_size, kernel_size);
 
     out.mark_device_dirty();
 }

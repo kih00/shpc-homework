@@ -7,6 +7,69 @@
 
 constexpr int NUM_GPUS = 4;
 
+// Buffer Pool for reducing memory allocation overhead
+class BufferPool {
+public:
+    BufferPool();
+    ~BufferPool();
+
+    void init(size_t max_batch, size_t max_seq_len, int device_id = 0);
+    void cleanup();
+
+    // Attention buffers
+    Tensor q_proj_out;
+    Tensor k_proj_out;
+    Tensor v_proj_out;
+    Tensor q_reshaped;
+    Tensor k_reshaped;
+    Tensor v_reshaped;
+    Tensor q_normed;
+    Tensor k_normed;
+    Tensor q_heads;
+    Tensor k_heads;
+    Tensor v_heads;
+    Tensor k_repeated;
+    Tensor v_repeated;
+    Tensor attn_output;
+    Tensor attn_flat;
+    Tensor attn_proj_out;
+
+    // ShortConv buffers
+    Tensor conv_in_proj;
+    Tensor conv_B;
+    Tensor conv_C;
+    Tensor conv_x_gate;
+    Tensor conv_Bx;
+    Tensor conv_out;
+    Tensor conv_y_pre;
+    Tensor conv_transposed;
+    Tensor conv_proj_out;
+
+    // MLP buffers (for dense layers)
+    Tensor mlp_gate;
+    Tensor mlp_gate_silu;
+    Tensor mlp_up;
+    Tensor mlp_hidden;
+    Tensor mlp_out;
+
+    // DecoderLayer buffers
+    Tensor layer_normed_input;
+    Tensor layer_attn_out;
+    Tensor layer_hidden;
+    Tensor layer_normed_hidden;
+
+    bool is_initialized() const { return initialized_; }
+
+private:
+    bool initialized_;
+    int device_id_;
+    size_t max_batch_;
+    size_t max_seq_len_;
+};
+
+// Global buffer pool instance (defined in model.cu)
+extern BufferPool g_buffer_pool;
+
 // RMSNorm Layer
 class RMSNorm {
 public:
