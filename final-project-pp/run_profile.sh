@@ -1,6 +1,6 @@
 #!/bin/bash
 
-: ${NODES:=4}
+: ${NODES:=1}
 
 NOW=$(date +%m%d_%H%M)
 

@@ -442,21 +442,26 @@ void Tensor::ensure_host_data() const {
 void Tensor::to_device(int device_id, cudaStream_t stream) const {
     if (size_ == 0) return;
 
+    int prev_device = -1;
+    CHECK_CUDA(cudaGetDevice(&prev_device));
+
     // If device_id is -1, use current device
     if (device_id == -1) {
-        CHECK_CUDA(cudaGetDevice(&device_id));
+        device_id = prev_device;
     }
 
     // Case 1: Already on target device
     if (device_data_ != nullptr && device_id_ == device_id) {
         // Only copy if host has newer data
         if (host_dirty_ && host_data_ != nullptr) {
-            CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
-            CHECK_CUDA(cudaStreamSynchronize(stream));
+            CHECK_CUDA(cudaSetDevice(device_id_));
+            CHECK_CUDA(cudaMemcpyAsync(
+                device_data_, host_data_, size_ * sizeof(float),
+                cudaMemcpyHostToDevice, stream));
             host_dirty_ = false;
             device_dirty_ = false;
         }
-        return;
+        goto cleanup;
     }
 
     // Case 2: Move from another device (P2P) or allocate new
@@ -473,11 +478,13 @@ void Tensor::to_device(int device_id, cudaStream_t stream) const {
         owns_device_ = true;
 
         // P2P Copy: Old Device -> New Device
-        CHECK_CUDA(cudaMemcpyPeerAsync(device_data_, device_id_, old_device_data, old_device_id, size_ * sizeof(float), stream));
-        CHECK_CUDA(cudaStreamSynchronize(stream));
+        CHECK_CUDA(cudaMemcpyPeerAsync(
+            device_data_, device_id_, old_device_data, old_device_id,
+            size_ * sizeof(float), stream));
 
         // Free old memory if we owned it
         if (old_owns_device) {
+            CHECK_CUDA(cudaStreamSynchronize(stream));
             CHECK_CUDA(cudaSetDevice(old_device_id));
             CHECK_CUDA(cudaFree(old_device_data));
             CHECK_CUDA(cudaSetDevice(device_id_));
@@ -485,7 +492,7 @@ void Tensor::to_device(int device_id, cudaStream_t stream) const {
         
         // Mark device as dirty, host_dirty_ state remains
         device_dirty_ = true;
-        return;
+        goto cleanup;
     }
 
     if (device_data_ != nullptr && device_dirty_) {
@@ -494,11 +501,8 @@ void Tensor::to_device(int device_id, cudaStream_t stream) const {
 
     // Free old device memory if on different device (This path is now only for when we didn't do P2P copy)
     if (device_data_ != nullptr && owns_device_ && device_id_ != device_id) {
-        int old_device;
-        CHECK_CUDA(cudaGetDevice(&old_device));
         CHECK_CUDA(cudaSetDevice(device_id_));
         CHECK_CUDA(cudaFree(device_data_));
-        CHECK_CUDA(cudaSetDevice(old_device));
         device_data_ = nullptr;
         owns_device_ = false;
     }
@@ -513,18 +517,27 @@ void Tensor::to_device(int device_id, cudaStream_t stream) const {
 
     // Copy from host if host data exists
     if (host_data_ != nullptr) {
-        CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
-        CHECK_CUDA(cudaStreamSynchronize(stream));
+        CHECK_CUDA(cudaMemcpyAsync(
+            device_data_, host_data_, size_ * sizeof(float),
+            cudaMemcpyHostToDevice, stream));
     }
     host_dirty_ = false;
     device_dirty_ = false;
+
+cleanup:
+    if (prev_device != -1 && prev_device != device_id) {
+        CHECK_CUDA(cudaSetDevice(prev_device));
+    }
 }
 
 void Tensor::to_host(cudaStream_t stream) const {
     if (size_ == 0) return;
     ensure_host_data();
     if (device_data_ != nullptr) {
-        CHECK_CUDA(cudaMemcpyAsync(host_data_, device_data_, size_ * sizeof(float), cudaMemcpyDeviceToHost, stream));
+        CHECK_CUDA(cudaSetDevice(device_id_));
+        CHECK_CUDA(cudaMemcpyAsync(
+            host_data_, device_data_, size_ * sizeof(float),
+            cudaMemcpyDeviceToHost, stream));
         CHECK_CUDA(cudaStreamSynchronize(stream));
         device_dirty_ = false;
         host_dirty_ = false;
@@ -534,8 +547,10 @@ void Tensor::to_host(cudaStream_t stream) const {
 void Tensor::sync_device_from_host(cudaStream_t stream) const {
     if (size_ == 0 || device_data_ == nullptr) return;
     ensure_host_data();
-    CHECK_CUDA(cudaMemcpyAsync(device_data_, host_data_, size_ * sizeof(float), cudaMemcpyHostToDevice, stream));
-    CHECK_CUDA(cudaStreamSynchronize(stream));
+    CHECK_CUDA(cudaSetDevice(device_id_));
+    CHECK_CUDA(cudaMemcpyAsync(
+        device_data_, host_data_, size_ * sizeof(float),
+        cudaMemcpyHostToDevice, stream));
     host_dirty_ = false;
     device_dirty_ = false;
 }
@@ -543,7 +558,10 @@ void Tensor::sync_device_from_host(cudaStream_t stream) const {
 void Tensor::sync_host_from_device(cudaStream_t stream) const {
     if (size_ == 0 || device_data_ == nullptr) return;
     ensure_host_data();
-    CHECK_CUDA(cudaMemcpyAsync(host_data_, device_data_, size_ * sizeof(float), cudaMemcpyDeviceToHost, stream));
+    CHECK_CUDA(cudaSetDevice(device_id_));
+    CHECK_CUDA(cudaMemcpyAsync(
+        host_data_, device_data_, size_ * sizeof(float),
+        cudaMemcpyDeviceToHost, stream));
     CHECK_CUDA(cudaStreamSynchronize(stream));
     device_dirty_ = false;
     host_dirty_ = false;

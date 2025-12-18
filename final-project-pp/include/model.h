@@ -36,6 +36,8 @@ private:
 
     // LM head (output projection)
     Tensor lm_head_;
+    size_t available_gpus_;
+    size_t layers_per_stage_;
 
     // RoPE
     std::unique_ptr<RotaryEmbedding> rotary_emb_;

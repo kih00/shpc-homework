@@ -4,6 +4,8 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <random>
 #include <cstring>
 #include <utility>
@@ -15,8 +17,11 @@ std::unique_ptr<ModelLoader> g_model_loader;
 // Global MPI rank for conditional debug output (set from main.cpp)
 int g_mpi_rank = 0;
 
-// Global buffer pool (definition)
-BufferPool g_buffer_pool;
+// Active stage context pointers (defined later)
+thread_local BufferPool* g_active_buffer_pool = nullptr;
+thread_local cudaStream_t* g_stage_shared_streams = nullptr;
+thread_local cudaEvent_t* g_stage_shared_events = nullptr;
+thread_local int g_active_stage_device = 0;
 
 // Debug print macro - only rank 0 prints
 #define DEBUG_PRINT(x) do { if (g_mpi_rank == 0) { std::cout << x; } } while(0)
@@ -289,39 +294,69 @@ void BufferPool::cleanup() {
     initialized_ = false;
 }
 
+struct StageResources {
+    BufferPool buffer_pool;
+    bool streams_initialized;
+    cudaStream_t shared_streams[2];
+    cudaEvent_t shared_events[3];
+
+    StageResources() : streams_initialized(false) {}
+};
+
+static std::array<StageResources, NUM_GPUS> g_stage_resources;
+
+void set_stage_resources(int device_id, size_t max_batch, size_t max_seq_len) {
+    if (device_id < 0 || device_id >= NUM_GPUS) {
+        throw std::runtime_error("Invalid device id for stage resources");
+    }
+
+    StageResources& res = g_stage_resources[device_id];
+
+    if (!res.buffer_pool.is_initialized()) {
+        res.buffer_pool.init(max_batch, max_seq_len, device_id);
+    }
+
+    if (!res.streams_initialized) {
+        CHECK_CUDA(cudaSetDevice(device_id));
+        for (int i = 0; i < 2; ++i) {
+            CHECK_CUDA(cudaStreamCreateWithFlags(
+                &res.shared_streams[i], cudaStreamNonBlocking));
+        }
+        for (int i = 0; i < 3; ++i) {
+            CHECK_CUDA(cudaEventCreateWithFlags(
+                &res.shared_events[i], cudaEventDisableTiming));
+        }
+        res.streams_initialized = true;
+    }
+
+    CHECK_CUDA(cudaSetDevice(device_id));
+    g_active_stage_device = device_id;
+    g_active_buffer_pool = &res.buffer_pool;
+    g_stage_shared_streams = res.shared_streams;
+    g_stage_shared_events = res.shared_events;
+}
+
+void cleanup_stage_resources() {
+    for (int device = 0; device < NUM_GPUS; ++device) {
+        StageResources& res = g_stage_resources[device];
+        if (res.streams_initialized) {
+            CHECK_CUDA(cudaSetDevice(device));
+            for (int i = 0; i < 2; ++i) cudaStreamDestroy(res.shared_streams[i]);
+            for (int i = 0; i < 3; ++i) cudaEventDestroy(res.shared_events[i]);
+            res.streams_initialized = false;
+        }
+        if (res.buffer_pool.is_initialized()) {
+            res.buffer_pool.cleanup();
+        }
+    }
+    g_active_buffer_pool = nullptr;
+    g_stage_shared_streams = nullptr;
+    g_stage_shared_events = nullptr;
+}
+
 // ============================================================================
 // Large Block Implementations - Complex layers and modules
 // ============================================================================
-
-// Global resources for multi-stream execution (GPU 0 only)
-static cudaStream_t g_shared_streams[2]; // 0: aux1 (MLP/Attn-K), 1: aux2 (Attn-V)
-static cudaEvent_t g_shared_events[3]; // 0: main_ready, 1: aux1_done, 2: aux2_done
-static bool g_shared_resources_init = false;
-
-void init_shared_resources() {
-    if (g_shared_resources_init) return;
-
-    CHECK_CUDA(cudaSetDevice(0));
-
-    for (int j = 0; j < 2; ++j) {
-        CHECK_CUDA(cudaStreamCreateWithFlags(
-            &g_shared_streams[j], cudaStreamNonBlocking));
-    }
-    for (int j = 0; j < 3; ++j) {
-        CHECK_CUDA(cudaEventCreateWithFlags(
-            &g_shared_events[j], cudaEventDisableTiming));
-    }
-
-    g_shared_resources_init = true;
-}
-
-void cleanup_shared_resources() {
-    if (!g_shared_resources_init) return;
-
-    for (int j = 0; j < 2; ++j) cudaStreamDestroy(g_shared_streams[j]);
-    for (int j = 0; j < 3; ++j) cudaEventDestroy(g_shared_events[j]);
-    g_shared_resources_init = false;
-}
 
 // MLP (Feed-Forward Network) implementation
 MLP::MLP(
@@ -352,9 +387,9 @@ void MLP::forward(const Tensor& x, Tensor& y, cudaStream_t stream) {
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
 
     // Use shared resources for GPU 0
-    cudaStream_t stream_aux = g_shared_streams[0];
-    cudaEvent_t event_main_ready = g_shared_events[0];
-    cudaEvent_t event_aux_done = g_shared_events[1];
+    cudaStream_t stream_aux = g_stage_shared_streams[0];
+    cudaEvent_t event_main_ready = g_stage_shared_events[0];
+    cudaEvent_t event_aux_done = g_stage_shared_events[1];
     
     // Record event to ensure input data is ready for aux stream
     CHECK_CUDA(cudaEventRecord(event_main_ready, stream));
@@ -423,16 +458,13 @@ void SparseMoeBlock::route_tokens(
     const Tensor& router_logits,
     std::vector<int>& top_k_indices, std::vector<float>& top_k_weights,
     cudaStream_t stream) {
-    // router_logits: (batch * seq_len, num_experts)
     size_t num_tokens = router_logits.size(0);
 
     top_k_indices.resize(num_tokens * NUM_EXPERTS_PER_TOK);
     top_k_weights.resize(num_tokens * NUM_EXPERTS_PER_TOK);
 
-    // Ensure router_logits is on device
     router_logits.to_device(-1, stream);
 
-    // Allocate device buffers & pointer
     int* d_topk_indices;
     float* d_topk_weights;
     CHECK_CUDA(cudaMalloc(
@@ -446,7 +478,6 @@ void SparseMoeBlock::route_tokens(
         d_expert_bias = expert_bias_.device_data();
     }
 
-    // Launch routing kernel
     dim3 block(NUM_EXPERTS);
     dim3 grid(num_tokens);
 
@@ -455,7 +486,6 @@ void SparseMoeBlock::route_tokens(
         d_topk_indices, d_topk_weights, num_tokens,
         NORM_TOPK_PROB, ROUTED_SCALING_FACTOR);
 
-    // Copy results back to host
     CHECK_CUDA(cudaMemcpyAsync(
         top_k_indices.data(), d_topk_indices,
         num_tokens * NUM_EXPERTS_PER_TOK * sizeof(int),
@@ -465,10 +495,7 @@ void SparseMoeBlock::route_tokens(
         num_tokens * NUM_EXPERTS_PER_TOK * sizeof(float),
         cudaMemcpyDeviceToHost, stream));
 
-    // Synchronize for bucketing in host
     CHECK_CUDA(cudaStreamSynchronize(stream));
-
-    // Free temporary device buffers
     CHECK_CUDA(cudaFree(d_topk_indices));
     CHECK_CUDA(cudaFree(d_topk_weights));
 }
@@ -480,7 +507,7 @@ void SparseMoeBlock::forward(
     size_t seq_len = x.size(1);
     size_t hidden_size = x.size(2);
     size_t num_tokens = batch * seq_len;
-    const int device = 0;  // All operations on GPU 0
+    int device = g_active_stage_device;
 
     CHECK_CUDA(cudaSetDevice(device));
 
@@ -497,11 +524,11 @@ void SparseMoeBlock::forward(
     std::vector<float> top_k_weights;
     route_tokens(router_logits, top_k_indices, top_k_weights, stream);
 
-    // Bucket tokens per expert (host)
+    // Bucket tokens per expert on host
     std::vector<std::vector<int>> tokens_per_expert(NUM_EXPERTS);
     std::vector<std::vector<float>> weights_per_expert(NUM_EXPERTS);
-    for (size_t t = 0; t < num_tokens; t++) {
-        for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; k++) {
+    for (size_t t = 0; t < num_tokens; ++t) {
+        for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; ++k) {
             int expert_idx = top_k_indices[t * NUM_EXPERTS_PER_TOK + k];
             float weight = top_k_weights[t * NUM_EXPERTS_PER_TOK + k];
             tokens_per_expert[expert_idx].push_back(static_cast<int>(t));
@@ -580,7 +607,6 @@ void SparseMoeBlock::forward(
             tok_count, hidden_size);
     }
 
-    // Free buffers
     CHECK_CUDA(cudaFree(d_indices));
     CHECK_CUDA(cudaFree(d_weights));
     CHECK_CUDA(cudaFreeHost(h_indices));
@@ -623,11 +649,11 @@ void Attention::forward(
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
 
     // Use shared resources for GPU 0
-    cudaStream_t stream_k = g_shared_streams[0];
-    cudaStream_t stream_v = g_shared_streams[1];
-    cudaEvent_t event_main_ready = g_shared_events[0];
-    cudaEvent_t event_k_done = g_shared_events[1];
-    cudaEvent_t event_v_done = g_shared_events[2];
+    cudaStream_t stream_k = g_stage_shared_streams[0];
+    cudaStream_t stream_v = g_stage_shared_streams[1];
+    cudaEvent_t event_main_ready = g_stage_shared_events[0];
+    cudaEvent_t event_k_done = g_stage_shared_events[1];
+    cudaEvent_t event_v_done = g_stage_shared_events[2];
 
     // Record event to ensure input data is ready for aux streams
     CHECK_CUDA(cudaEventRecord(event_main_ready, stream));
@@ -635,22 +661,39 @@ void Attention::forward(
     CHECK_CUDA(cudaStreamWaitEvent(stream_v, event_main_ready, 0));
 
     // Use buffer pool for intermediate tensors
-    Tensor& q_proj_out = g_buffer_pool.q_proj_out;
-    Tensor& k_proj_out = g_buffer_pool.k_proj_out;
-    Tensor& v_proj_out = g_buffer_pool.v_proj_out;
-    Tensor& q_reshaped = g_buffer_pool.q_reshaped;
-    Tensor& k_reshaped = g_buffer_pool.k_reshaped;
-    Tensor& v_reshaped = g_buffer_pool.v_reshaped;
-    Tensor& q_normed = g_buffer_pool.q_normed;
-    Tensor& k_normed = g_buffer_pool.k_normed;
-    Tensor& q = g_buffer_pool.q_heads;
-    Tensor& k = g_buffer_pool.k_heads;
-    Tensor& v = g_buffer_pool.v_heads;
-    Tensor& k_repeated = g_buffer_pool.k_repeated;
-    Tensor& v_repeated = g_buffer_pool.v_repeated;
-    Tensor& attn_out = g_buffer_pool.attn_output;
-    Tensor& attn_flat = g_buffer_pool.attn_flat;
-    Tensor& output_flat = g_buffer_pool.attn_proj_out;
+    size_t flat_tokens = batch * seq_len;
+    Tensor q_proj_out = g_active_buffer_pool->q_proj_out.view(
+        {flat_tokens, NUM_ATTENTION_HEADS * HEAD_DIM});
+    Tensor k_proj_out = g_active_buffer_pool->k_proj_out.view(
+        {flat_tokens, NUM_KEY_VALUE_HEADS * HEAD_DIM});
+    Tensor v_proj_out = g_active_buffer_pool->v_proj_out.view(
+        {flat_tokens, NUM_KEY_VALUE_HEADS * HEAD_DIM});
+    Tensor q_reshaped = g_active_buffer_pool->q_reshaped.view(
+        {batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM});
+    Tensor k_reshaped = g_active_buffer_pool->k_reshaped.view(
+        {batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
+    Tensor v_reshaped = g_active_buffer_pool->v_reshaped.view(
+        {batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
+    Tensor q_normed = g_active_buffer_pool->q_normed.view(
+        {batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM});
+    Tensor k_normed = g_active_buffer_pool->k_normed.view(
+        {batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM});
+    Tensor q = g_active_buffer_pool->q_heads.view(
+        {batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
+    Tensor k = g_active_buffer_pool->k_heads.view(
+        {batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
+    Tensor v = g_active_buffer_pool->v_heads.view(
+        {batch, NUM_KEY_VALUE_HEADS, seq_len, HEAD_DIM});
+    Tensor k_repeated = g_active_buffer_pool->k_repeated.view(
+        {batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
+    Tensor v_repeated = g_active_buffer_pool->v_repeated.view(
+        {batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
+    Tensor attn_out = g_active_buffer_pool->attn_output.view(
+        {batch, NUM_ATTENTION_HEADS, seq_len, HEAD_DIM});
+    Tensor attn_flat = g_active_buffer_pool->attn_flat.view(
+        {flat_tokens, HIDDEN_SIZE});
+    Tensor output_flat = g_active_buffer_pool->attn_proj_out.view(
+        {flat_tokens, HIDDEN_SIZE});
 
     // Project Q, K, V (multi-stream)
     tensor_ops::matmul_transposed(x_flat, q_proj_, q_proj_out, stream);
@@ -708,7 +751,7 @@ void Attention::forward(
     // Copy result to output buffer
     if (output.size() == 0) {
         output = Tensor({batch, seq_len, hidden_size});
-        output.to_device(0, stream);
+        output.to_device(g_active_stage_device, stream);
     }
     CHECK_CUDA(cudaMemcpyAsync(output.device_data(), output_flat.device_data(),
                batch * seq_len * hidden_size * sizeof(float), cudaMemcpyDeviceToDevice, stream));
@@ -756,9 +799,13 @@ void ShortConv::forward(const Tensor& x, Tensor& y, cudaStream_t stream) {
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
 
     // Use buffer pool for intermediate tensors
-    Tensor& in_proj_out = g_buffer_pool.conv_in_proj;
-    Tensor& conv_out = g_buffer_pool.conv_transposed;  // (batch, seq, hidden)
-    Tensor& y_flat = g_buffer_pool.conv_proj_out;
+    size_t flat_tokens = batch * seq_len;
+    Tensor in_proj_out = g_active_buffer_pool->conv_in_proj.view(
+        {flat_tokens, 3 * hidden_size});
+    Tensor conv_out = g_active_buffer_pool->conv_transposed.view(
+        {batch, seq_len, hidden_size});
+    Tensor y_flat = g_active_buffer_pool->conv_proj_out.view(
+        {flat_tokens, hidden_size});
 
     // in_proj: (b*s, hidden) @ (3*hidden, hidden)^T -> (b*s, 3*hidden)
     tensor_ops::matmul_transposed(x_flat, in_proj_weight_, in_proj_out, stream);
@@ -788,7 +835,7 @@ void ShortConv::forward(const Tensor& x, Tensor& y, cudaStream_t stream) {
     // Copy result to output buffer
     if (y.size() == 0) {
         y = Tensor({batch, seq_len, hidden_size});
-        y.to_device(0, stream);
+        y.to_device(g_active_stage_device, stream);
     }
     CHECK_CUDA(cudaMemcpyAsync(y.device_data(), y_flat.device_data(),
                batch * seq_len * hidden_size * sizeof(float),
@@ -840,10 +887,14 @@ void DecoderLayer::forward(
     size_t hidden_size = x.size(2);
 
     // Use buffer pool for intermediate tensors
-    Tensor& normed_input = g_buffer_pool.layer_normed_input;
-    Tensor& attn_output = g_buffer_pool.layer_attn_out;
-    Tensor& hidden_states = g_buffer_pool.layer_hidden;
-    Tensor& normed_hidden = g_buffer_pool.layer_normed_hidden;
+    Tensor normed_input = g_active_buffer_pool->layer_normed_input.view(
+        {batch, seq_len, hidden_size});
+    Tensor attn_output = g_active_buffer_pool->layer_attn_out.view(
+        {batch, seq_len, hidden_size});
+    Tensor hidden_states = g_active_buffer_pool->layer_hidden.view(
+        {batch, seq_len, hidden_size});
+    Tensor normed_hidden = g_active_buffer_pool->layer_normed_hidden.view(
+        {batch, seq_len, hidden_size});
 
     // Input norm
     input_layernorm_->forward(x, normed_input, stream);
@@ -876,7 +927,7 @@ void DecoderLayer::forward(
 
     // Residual connection - output needs to be a new tensor for caller
     output = Tensor({batch, seq_len, hidden_size});
-    output.to_device(0, stream);
+    output.to_device(g_active_stage_device, stream);
     tensor_ops::add(hidden_states, ffn_output, output, stream);
 }
 
@@ -893,8 +944,15 @@ double get_time_layer() {
 LFM2Model::LFM2Model(const std::string& model_file) {
     DEBUG_PRINTLN("Loading LFM2-8B-A1B model from " << model_file);
 
-    // Initialize global shared resources for multi-stream execution
-    init_shared_resources();
+    int device_count = 0;
+    CHECK_CUDA(cudaGetDeviceCount(&device_count));
+    available_gpus_ = std::min(
+        static_cast<size_t>(device_count),
+        static_cast<size_t>(NUM_GPUS));
+    if (available_gpus_ == 0) {
+        throw std::runtime_error("No CUDA devices available");
+    }
+    layers_per_stage_ = (NUM_HIDDEN_LAYERS + available_gpus_ - 1) / available_gpus_;
 
     // Initialize global model loader
     g_model_loader = std::make_unique<ModelLoader>(model_file);
@@ -910,7 +968,7 @@ LFM2Model::LFM2Model(const std::string& model_file) {
 }
 
 LFM2Model::~LFM2Model() {
-    cleanup_shared_resources();
+    cleanup_stage_resources();
 }
 
 void LFM2Model::load_embeddings() {
@@ -929,7 +987,9 @@ void LFM2Model::load_layers() {
     layers_.reserve(NUM_HIDDEN_LAYERS);
     for (size_t i = 0; i < NUM_HIDDEN_LAYERS; i++) {
         bool is_attention = (LAYER_TYPES[i] == 0);
-        int device_id = 0;
+        int device_id = std::min(
+            static_cast<int>(i / layers_per_stage_),
+            static_cast<int>(available_gpus_ - 1));
         DEBUG_PRINTLN(
             "  Layer " << i << ": " << (is_attention ? "Attention" : "Conv"));
         layers_.push_back(std::make_unique<DecoderLayer>(
@@ -952,95 +1012,200 @@ void LFM2Model::load_output_layers() {
     }
 }
 
-void LFM2Model::forward(const std::vector<int>& input_ids, size_t batch, size_t seq_len, Tensor& logits, cudaStream_t stream) {
+void LFM2Model::forward(
+    const std::vector<int>& input_ids, size_t batch,
+    size_t seq_len, Tensor& logits, cudaStream_t) {
+
     if (batch == 0 || seq_len == 0 || input_ids.size() != batch * seq_len) {
         throw std::runtime_error("Invalid batch/seq_len for forward");
+    }
+    if (available_gpus_ < NUM_GPUS) {
+        throw std::runtime_error("Pipeline parallelism requires 4 GPUs");
     }
 
     DEBUG_PRINTLN("\nForward pass: batch=" << batch << ", seq_len=" << seq_len);
 
-    // Initialize buffer pool if not already done (or if dimensions changed)
-    if (!g_buffer_pool.is_initialized()) {
-        g_buffer_pool.init(batch, seq_len, 0);
+    struct MicroBatchState {
+        size_t id = 0;
+        size_t offset = 0;
+        size_t size = 0;
+        double start_time = 0.0;
+        Tensor activations;
+    };
+
+    struct StageContext {
+        int device_id = 0;
+        std::vector<DecoderLayer*> layers;
+        cudaStream_t stream = nullptr;
+        Tensor cos;
+        Tensor sin;
+    };
+
+    const size_t stage_count = NUM_GPUS;
+    size_t micro_batch_size =
+        std::max<size_t>(1, batch / (stage_count * 2));
+    micro_batch_size = std::min(micro_batch_size, batch);
+    size_t num_micro_batches =
+        (batch + micro_batch_size - 1) / micro_batch_size;
+
+    std::vector<MicroBatchState> micro_batches(num_micro_batches);
+    for (size_t mb = 0; mb < num_micro_batches; ++mb) {
+        size_t start = mb * micro_batch_size;
+        size_t size = std::min(micro_batch_size, batch - start);
+        micro_batches[mb].id = mb;
+        micro_batches[mb].offset = start;
+        micro_batches[mb].size = size;
     }
 
-    size_t num_tokens = batch * seq_len;
-
-    // Embedding lookup (base device)
-    CHECK_CUDA(cudaSetDevice(0));
-
-    // Copy input_ids to device
-    int* d_input_ids;
-    CHECK_CUDA(cudaMalloc(&d_input_ids, num_tokens * sizeof(int)));
-    CHECK_CUDA(cudaMemcpyAsync(
-        d_input_ids, input_ids.data(), num_tokens * sizeof(int),
-        cudaMemcpyHostToDevice, stream));
-
-    embed_tokens_.to_device(0, stream);
-    Tensor hidden_states({batch, seq_len, HIDDEN_SIZE});
-    hidden_states.to_device(0, stream);
-
-    // Launch kernel
-    size_t total = num_tokens * HIDDEN_SIZE;
-    dim3 block(256);
-    dim3 grid((total + 255) / 256);
-
-    embedding_lookup_kernel<<<grid, block, 0, stream>>>(
-        d_input_ids, embed_tokens_.device_data(), hidden_states.device_data(),
-        num_tokens, HIDDEN_SIZE);
-
-    CHECK_CUDA(cudaFree(d_input_ids));
-    hidden_states.mark_device_dirty();
-
-    // Compute RoPE embeddings
-    Tensor cos({seq_len, HEAD_DIM});
-    Tensor sin({seq_len, HEAD_DIM});
-    cos.to_device(0, stream);
-    sin.to_device(0, stream);
-    rotary_emb_->forward(seq_len, cos, sin, stream);
-
-    // Create causal attention mask (not strictly needed for CPU impl)
-    Tensor* attention_mask = nullptr;
-
-    // Keep activations on base device
-    CHECK_CUDA(cudaSetDevice(0));
-    hidden_states.to_device(0, stream);
-
-    for (size_t i = 0; i < NUM_HIDDEN_LAYERS; i++) {
-        double start_time = get_time_layer();
-
-        Tensor output({batch, seq_len, HIDDEN_SIZE});
-        layers_[i]->forward(hidden_states, cos, sin, attention_mask, output, stream);
-        hidden_states = std::move(output);
-
-        double end_time = get_time_layer();
-        DEBUG_PRINTLN(
-            "  Layer " << i << ": " << (end_time - start_time) << " seconds");
+    std::vector<std::vector<DecoderLayer*>> stage_layers(stage_count);
+    for (auto& layer : layers_) {
+        size_t stage_idx = std::min(
+            static_cast<size_t>(layer->device_id()),
+            stage_count - 1);
+        stage_layers[stage_idx].push_back(layer.get());
     }
 
-    CHECK_CUDA(cudaSetDevice(0));
+    std::vector<StageContext> stages(stage_count);
+    for (size_t idx = 0; idx < stage_count; ++idx) {
+        stages[idx].device_id = static_cast<int>(idx);
+        stages[idx].layers = stage_layers[idx];
+        CHECK_CUDA(cudaSetDevice(stages[idx].device_id));
+        CHECK_CUDA(cudaStreamCreateWithFlags(
+            &stages[idx].stream, cudaStreamNonBlocking));
+    }
 
-    // Final norm (base device)
-    Tensor normed_output({batch, seq_len, HIDDEN_SIZE});
-    norm_->forward(hidden_states, normed_output, stream);
+    // Prepare RoPE for each stage
+    set_stage_resources(stages.front().device_id, batch, seq_len);
+    Tensor cos_ref({seq_len, HEAD_DIM});
+    Tensor sin_ref({seq_len, HEAD_DIM});
+    cos_ref.to_device(stages.front().device_id);
+    sin_ref.to_device(stages.front().device_id);
+    rotary_emb_->forward(seq_len, cos_ref, sin_ref, 0);
+    cos_ref.to_host();
+    sin_ref.to_host();
 
-    // Extract last token
-    Tensor last_hidden({batch, HIDDEN_SIZE});
-    last_hidden.to_device(0, stream);
+    for (auto& stage : stages) {
+        stage.cos = cos_ref;
+        stage.sin = sin_ref;
+        stage.cos.to_device(stage.device_id);
+        stage.sin.to_device(stage.device_id);
+    }
 
-    size_t total_last = batch * HIDDEN_SIZE;
-    dim3 block_last(256);
-    dim3 grid_last((total_last + 255) / 256);
+    const int first_device = stages.front().device_id;
+    set_stage_resources(first_device, batch, seq_len);
+    embed_tokens_.to_device(first_device);
+    size_t max_tokens = micro_batch_size * seq_len;
+    int* d_input_ids = nullptr;
+    CHECK_CUDA(cudaMalloc(&d_input_ids, max_tokens * sizeof(int)));
 
-    extract_last_token_kernel<<<grid_last, block_last, 0, stream>>>(
-        normed_output.device_data(), last_hidden.device_data(),
-        batch, seq_len, HIDDEN_SIZE);
-    last_hidden.mark_device_dirty();
-
-    // LM head projection
     logits = Tensor({batch, VOCAB_SIZE});
-    tensor_ops::matmul_transposed(last_hidden, lm_head_, logits, stream);
+    logits.to_host();
+    float* logits_host = logits.data();
 
-    // Reset to device 0
-    CHECK_CUDA(cudaSetDevice(0));
+    std::vector<std::atomic<int>> stage_gate(num_micro_batches);
+    for (auto& gate : stage_gate) {
+        gate.store(0, std::memory_order_relaxed);
+    }
+
+    #pragma omp parallel num_threads(NUM_GPUS)
+    {
+        int stage_idx = omp_get_thread_num();
+        StageContext& stage = stages[stage_idx];
+        set_stage_resources(stage.device_id, batch, seq_len);
+
+        for (size_t mb = 0; mb < num_micro_batches; ++mb) {
+            while (stage_gate[mb].load(std::memory_order_acquire) != stage_idx) {
+                // busy wait
+            }
+
+            MicroBatchState& micro = micro_batches[mb];
+            cudaStream_t stream = stage.stream;
+
+            if (stage_idx == 0) {
+                micro.start_time = get_time_layer();
+                size_t tokens = micro.size * seq_len;
+                const int* host_ptr =
+                    input_ids.data() + micro.offset * seq_len;
+                CHECK_CUDA(cudaMemcpyAsync(
+                    d_input_ids, host_ptr, tokens * sizeof(int),
+                    cudaMemcpyHostToDevice, stream));
+
+                Tensor hidden({micro.size, seq_len, HIDDEN_SIZE});
+                hidden.to_device(first_device, stream);
+
+                size_t total = tokens * HIDDEN_SIZE;
+                dim3 block(256);
+                dim3 grid((total + 255) / 256);
+                embedding_lookup_kernel<<<grid, block, 0, stream>>>(
+                    d_input_ids, embed_tokens_.device_data(),
+                    hidden.device_data(), tokens, HIDDEN_SIZE);
+                hidden.mark_device_dirty();
+                micro.activations = std::move(hidden);
+            } else {
+                micro.activations.to_device(stage.device_id, stream);
+            }
+
+            Tensor hidden = std::move(micro.activations);
+            for (DecoderLayer* layer : stage.layers) {
+                Tensor output({micro.size, seq_len, HIDDEN_SIZE});
+                layer->forward(
+                    hidden, stage.cos, stage.sin,
+                    nullptr, output, stream);
+                hidden = std::move(output);
+            }
+            micro.activations = std::move(hidden);
+
+            if (stage_idx + 1 < static_cast<int>(stage_count)) {
+                micro.activations.to_device(
+                    stages[stage_idx + 1].device_id, stream);
+                CHECK_CUDA(cudaStreamSynchronize(stream));
+            } else {
+                Tensor normed({micro.size, seq_len, HIDDEN_SIZE});
+                norm_->forward(micro.activations, normed, stream);
+
+                Tensor last_hidden({micro.size, HIDDEN_SIZE});
+                last_hidden.to_device(stage.device_id, stream);
+                size_t total = micro.size * HIDDEN_SIZE;
+                dim3 block_last(256);
+                dim3 grid_last((total + 255) / 256);
+                extract_last_token_kernel<<<grid_last, block_last, 0, stream>>>(
+                    normed.device_data(), last_hidden.device_data(),
+                    micro.size, seq_len, HIDDEN_SIZE);
+                last_hidden.mark_device_dirty();
+
+                Tensor logits_mb({micro.size, VOCAB_SIZE});
+                tensor_ops::matmul_transposed(
+                    last_hidden, lm_head_, logits_mb, stream);
+                logits_mb.to_host(stream);
+                CHECK_CUDA(cudaStreamSynchronize(stream));
+
+                size_t offset = micro.offset * VOCAB_SIZE;
+                std::memcpy(
+                    logits_host + offset, logits_mb.data(),
+                    micro.size * VOCAB_SIZE * sizeof(float));
+                double elapsed = get_time_layer() - micro.start_time;
+                #pragma omp critical
+                {
+                    fprintf(stdout,
+                        "[Pipeline] micro %zu finished in %.3f ms "
+                        "(batch_offset=%zu)\n",
+                        micro.id, elapsed * 1000.0, micro.offset);
+                }
+                micro.activations = Tensor();
+            }
+
+            stage_gate[mb].store(stage_idx + 1, std::memory_order_release);
+        }
+    }
+
+    for (auto& stage : stages) {
+        if (stage.stream) {
+            CHECK_CUDA(cudaSetDevice(stage.device_id));
+            cudaStreamDestroy(stage.stream);
+        }
+    }
+    if (d_input_ids) {
+        CHECK_CUDA(cudaSetDevice(first_device));
+        cudaFree(d_input_ids);
+    }
 }

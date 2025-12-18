@@ -67,8 +67,13 @@ private:
     size_t max_seq_len_;
 };
 
-// Global buffer pool instance (defined in model.cu)
-extern BufferPool g_buffer_pool;
+// Active buffer pool/stream context for the current stage (defined in layer.cu)
+extern thread_local BufferPool* g_active_buffer_pool;
+extern thread_local cudaStream_t* g_stage_shared_streams;
+extern thread_local cudaEvent_t* g_stage_shared_events;
+
+void set_stage_resources(int device_id, size_t max_batch, size_t max_seq_len);
+void cleanup_stage_resources();
 
 // RMSNorm Layer
 class RMSNorm {

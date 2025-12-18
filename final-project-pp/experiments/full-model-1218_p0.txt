@@ -1,0 +1,53 @@
+
+=============================================
+ Model: LFM2-8B-A1B
+---------------------------------------------
+ Validation: ON
+ Warm-up: ON
+ Number of samples: 128
+ Micro-batch size: 32
+=============================================
+
+Initializing inputs and outputs...Done!
+Input file info:
+  Total samples: 1024
+  Sequence length: 16
+  Processing samples: 128
+  MPI ranks: 1
+
+Loading model from /mnt/ramdisk/model.bin...Loading LFM2-8B-A1B model from /mnt/ramdisk/model.bin
+Loading model index from /mnt/ramdisk/model.bin
+  Number of tensors: 2302
+  Index loaded successfully
+Loading embeddings...
+  Embeddings shape: 65536 x 2048
+Loading 24 decoder layers...
+  Layer 0: Conv (GPU 0)
+  Layer 1: Conv (GPU 0)
+  Layer 2: Attention (GPU 0)
+  Layer 3: Conv (GPU 0)
+  Layer 4: Conv (GPU 0)
+  Layer 5: Conv (GPU 0)
+  Layer 6: Attention (GPU 1)
+  Layer 7: Conv (GPU 1)
+  Layer 8: Conv (GPU 1)
+  Layer 9: Conv (GPU 1)
+  Layer 10: Attention (GPU 1)
+  Layer 11: Conv (GPU 1)
+  Layer 12: Conv (GPU 2)
+  Layer 13: Conv (GPU 2)
+  Layer 14: Attention (GPU 2)
+  Layer 15: Conv (GPU 2)
+  Layer 16: Conv (GPU 2)
+  Layer 17: Conv (GPU 2)
+  Layer 18: Attention (GPU 3)
+  Layer 19: Conv (GPU 3)
+  Layer 20: Conv (GPU 3)
+  Layer 21: Attention (GPU 3)
+  Layer 22: Conv (GPU 3)
+  Layer 23: Conv (GPU 3)
+Loading output layers...
+  Using tied weights for LM head
+Model loaded successfully!
+Warming up...
+Forward pass: batch=32, seq_len=16
