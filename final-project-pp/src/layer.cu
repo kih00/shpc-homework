@@ -67,22 +67,23 @@ __global__ void matmul_transpose_kernel(
     const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C,
     size_t m, size_t k, size_t n) {
 
-    const int BM = 64;
-    const int BN = 64;
-    const int BK = 32;
-    const int TM = 4;
-    const int TN = 4;
+    const int BM = 128;
+    const int BN = 128;
+    const int BK = 8;
+    const int TM = 8;
+    const int TN = 8;
 
-    __shared__ float As[BM][BK + 1];
-    __shared__ float Bs[BN][BK + 1];
+    __shared__ float As[2][BM][BK + 1];
+    __shared__ float Bs[2][BN][BK + 1];
 
     int tid = threadIdx.x;
     int ty = tid / 16;
     int tx = tid % 16;
 
-    float thread_results[TM][TN] = {0.0f};
+    float reg_c[TM][TN] = {0.0f};
     float reg_a[TM];
     float reg_b[TN];
+    float4 load_a, load_b;
 
     size_t a_row_start = blockIdx.y * BM;
     size_t b_row_start = blockIdx.x * BN;
@@ -90,81 +91,113 @@ __global__ void matmul_transpose_kernel(
     const float* A_ptr = A + a_row_start * k;
     const float* B_ptr = B + b_row_start * k;
 
+    // Load tile 0
+    int t_row = tid / 2;
+    int t_col = (tid % 2) * 4;
+
+    // Load A
+    if (t_row < BM && (a_row_start + t_row) < m && (t_col < k)) {
+            load_a = reinterpret_cast<const float4*>(&A_ptr[t_row * k + t_col])[0];
+    } else {
+            load_a = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    As[0][t_row][t_col] = load_a.x; As[0][t_row][t_col+1] = load_a.y;
+    As[0][t_row][t_col+2] = load_a.z; As[0][t_row][t_col+3] = load_a.w;
+
+    // Load B
+    if (t_row < BN && (b_row_start + t_row) < n && (t_col < k)) {
+            load_b = reinterpret_cast<const float4*>(&B_ptr[t_row * k + t_col])[0];
+    } else {
+            load_b = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    Bs[0][t_row][t_col] = load_b.x; Bs[0][t_row][t_col+1] = load_b.y;
+    Bs[0][t_row][t_col+2] = load_b.z; Bs[0][t_row][t_col+3] = load_b.w;
+
+    __syncthreads();
+
+    int next = 1;
+    int curr = 0;
+
     for (size_t k_idx = 0; k_idx < k; k_idx += BK) {
-        // Load A and B tiles using float4
-        int t_row = tid / 8;
-        int t_col = (tid % 8) * 4;
+        size_t next_k = k_idx + BK;
 
-        // Load A (2 rows per thread)
-        if (t_row < BM && (a_row_start + t_row) < m) {
-             float4 v = reinterpret_cast<const float4*>(&A_ptr[t_row * k + k_idx + t_col])[0];
-             As[t_row][t_col] = v.x; As[t_row][t_col+1] = v.y;
-             As[t_row][t_col+2] = v.z; As[t_row][t_col+3] = v.w;
-        } else {
-             As[t_row][t_col] = 0.0f; As[t_row][t_col+1] = 0.0f;
-             As[t_row][t_col+2] = 0.0f; As[t_row][t_col+3] = 0.0f;
+        // Prefetch next tile
+        if (next_k < k) {
+            int t_row = tid / 2;
+            int t_col = (tid % 2) * 4;
+
+            if (t_row < BM && (a_row_start + t_row) < m && (next_k + t_col < k)) {
+                load_a = reinterpret_cast<const float4*>(&A_ptr[t_row * k + next_k + t_col])[0];
+            } else {
+                load_a = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            }
+
+            if (t_row < BN && (b_row_start + t_row) < n && (next_k + t_col < k)) {
+                load_b = reinterpret_cast<const float4*>(&B_ptr[t_row * k + next_k + t_col])[0];
+            } else {
+                load_b = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            }
         }
 
-        int t_row2 = t_row + 32;
-        if (t_row2 < BM && (a_row_start + t_row2) < m) {
-             float4 v = reinterpret_cast<const float4*>(&A_ptr[t_row2 * k + k_idx + t_col])[0];
-             As[t_row2][t_col] = v.x; As[t_row2][t_col+1] = v.y;
-             As[t_row2][t_col+2] = v.z; As[t_row2][t_col+3] = v.w;
-        } else {
-             As[t_row2][t_col] = 0.0f; As[t_row2][t_col+1] = 0.0f;
-             As[t_row2][t_col+2] = 0.0f; As[t_row2][t_col+3] = 0.0f;
-        }
-
-        // Load B (2 rows per thread)
-        if (t_row < BN && (b_row_start + t_row) < n) {
-             float4 v = reinterpret_cast<const float4*>(&B_ptr[t_row * k + k_idx + t_col])[0];
-             Bs[t_row][t_col] = v.x; Bs[t_row][t_col+1] = v.y;
-             Bs[t_row][t_col+2] = v.z; Bs[t_row][t_col+3] = v.w;
-        } else {
-             Bs[t_row][t_col] = 0.0f; Bs[t_row][t_col+1] = 0.0f;
-             Bs[t_row][t_col+2] = 0.0f; Bs[t_row][t_col+3] = 0.0f;
-        }
-
-        int t_row2_b = t_row + 32;
-        if (t_row2_b < BN && (b_row_start + t_row2_b) < n) {
-             float4 v = reinterpret_cast<const float4*>(&B_ptr[t_row2_b * k + k_idx + t_col])[0];
-             Bs[t_row2_b][t_col] = v.x; Bs[t_row2_b][t_col+1] = v.y;
-             Bs[t_row2_b][t_col+2] = v.z; Bs[t_row2_b][t_col+3] = v.w;
-        } else {
-             Bs[t_row2_b][t_col] = 0.0f; Bs[t_row2_b][t_col+1] = 0.0f;
-             Bs[t_row2_b][t_col+2] = 0.0f; Bs[t_row2_b][t_col+3] = 0.0f;
-        }
-
-        __syncthreads();
-
+        // Compute
         #pragma unroll
         for (int i = 0; i < BK; ++i) {
             #pragma unroll
-            for (int r = 0; r < TM; ++r) reg_a[r] = As[ty * TM + r][i];
+            for (int r = 0; r < TM; ++r) reg_a[r] = As[curr][ty * TM + r][i];
             #pragma unroll
-            for (int c = 0; c < TN; ++c) reg_b[c] = Bs[tx * TN + c][i];
+            for (int c = 0; c < TN; ++c) reg_b[c] = Bs[curr][tx * TN + c][i];
 
             #pragma unroll
             for (int r = 0; r < TM; ++r) {
                 #pragma unroll
                 for (int c = 0; c < TN; ++c) {
-                    thread_results[r][c] += reg_a[r] * reg_b[c];
+                    reg_c[r][c] += reg_a[r] * reg_b[c];
                 }
             }
         }
 
-        __syncthreads();
+        // Store prefetched tile to shared memory
+        if (next_k < k) {
+            __syncthreads();
+            
+            int t_row = tid / 2;
+            int t_col = (tid % 2) * 4;
+
+            As[next][t_row][t_col] = load_a.x;
+            As[next][t_row][t_col+1] = load_a.y;
+            As[next][t_row][t_col+2] = load_a.z;
+            As[next][t_row][t_col+3] = load_a.w;
+
+            Bs[next][t_row][t_col] = load_b.x;
+            Bs[next][t_row][t_col+1] = load_b.y;
+            Bs[next][t_row][t_col+2] = load_b.z;
+            Bs[next][t_row][t_col+3] = load_b.w;
+
+            __syncthreads();
+
+            curr ^= 1;
+            next ^= 1;
+        }
     }
 
     // Store
     #pragma unroll
     for (int r = 0; r < TM; ++r) {
-        #pragma unroll
-        for (int c = 0; c < TN; ++c) {
-            int row = a_row_start + ty * TM + r;
-            int col = b_row_start + tx * TN + c;
-            if (row < m && col < n) {
-                C[row * n + col] = thread_results[r][c];
+        int row = a_row_start + ty * TM + r;
+        if (row < m) {
+            #pragma unroll
+            for (int c = 0; c < TN; c += 4) {
+                int col = b_row_start + tx * TN + c;
+                if (col + 3 < n) {
+                    float4 v;
+                    v.x = reg_c[r][c]; v.y = reg_c[r][c+1];
+                    v.z = reg_c[r][c+2]; v.w = reg_c[r][c+3];
+                    reinterpret_cast<float4*>(&C[row * n + col])[0] = v;
+                } else {
+                    for (int i = 0; i < 4; ++i) {
+                        if (col + i < n) C[row * n + col + i] = reg_c[r][c+i];
+                    }
+                }
             }
         }
     }
@@ -730,7 +763,7 @@ void matmul_transposed(
 
     // Optimized kernel launch config
     dim3 block(BLOCK_OPS);
-    dim3 grid((n + 63) / 64, (m + 63) / 64);
+    dim3 grid((n + 127) / 128, (m + 127) / 128);
     matmul_transpose_kernel<<<grid, block, 0, stream>>>(
         a.device_data(), b.device_data(), c.device_data(), m, k, n);
 

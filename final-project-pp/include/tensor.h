@@ -28,6 +28,7 @@ public:
     // Constructors
     Tensor();
     Tensor(const std::vector<size_t>& shape);
+    Tensor(const std::vector<size_t>& shape, int device_id); // Device-only allocation
     Tensor(const std::vector<size_t>& shape, float* data, bool copy = true);
     ~Tensor();
 

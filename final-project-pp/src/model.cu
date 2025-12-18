@@ -293,50 +293,42 @@ void BufferPool::cleanup() {
 // Large Block Implementations - Complex layers and modules
 // ============================================================================
 
-// Global resources for multi-stream (to avoid creating thousands of streams)
-static cudaStream_t g_shared_streams[NUM_GPUS][2]; // 0: aux1 (MLP/Attn-K), 1: aux2 (Attn-V)
-static cudaEvent_t g_shared_events[NUM_GPUS][3]; // 0: main_ready, 1: aux1_done, 2: aux2_done
+// Global resources for multi-stream execution (GPU 0 only)
+static cudaStream_t g_shared_streams[2]; // 0: aux1 (MLP/Attn-K), 1: aux2 (Attn-V)
+static cudaEvent_t g_shared_events[3]; // 0: main_ready, 1: aux1_done, 2: aux2_done
 static bool g_shared_resources_init = false;
 
 void init_shared_resources() {
     if (g_shared_resources_init) return;
 
-    int prev_device;
-    CHECK_CUDA(cudaGetDevice(&prev_device));
+    CHECK_CUDA(cudaSetDevice(0));
 
-    // make global streams per GPUs
-    for (int i = 0; i < NUM_GPUS; ++i) {
-        CHECK_CUDA(cudaSetDevice(i));
-        for (int j = 0; j < 2; ++j) {
-            CHECK_CUDA(cudaStreamCreateWithFlags(
-                &g_shared_streams[i][j], cudaStreamNonBlocking));
-        }
-        for (int j = 0; j < 3; ++j) {
-            CHECK_CUDA(cudaEventCreateWithFlags(
-                &g_shared_events[i][j], cudaEventDisableTiming));
-        }
+    for (int j = 0; j < 2; ++j) {
+        CHECK_CUDA(cudaStreamCreateWithFlags(
+            &g_shared_streams[j], cudaStreamNonBlocking));
+    }
+    for (int j = 0; j < 3; ++j) {
+        CHECK_CUDA(cudaEventCreateWithFlags(
+            &g_shared_events[j], cudaEventDisableTiming));
     }
 
-    CHECK_CUDA(cudaSetDevice(prev_device));
     g_shared_resources_init = true;
 }
 
 void cleanup_shared_resources() {
     if (!g_shared_resources_init) return;
 
-    for (int i = 0; i < NUM_GPUS; ++i) {
-        // No need to set device for destroy usually, but safer
-        for (int j = 0; j < 2; ++j) cudaStreamDestroy(g_shared_streams[i][j]);
-        for (int j = 0; j < 3; ++j) cudaEventDestroy(g_shared_events[i][j]);
-    }
+    for (int j = 0; j < 2; ++j) cudaStreamDestroy(g_shared_streams[j]);
+    for (int j = 0; j < 3; ++j) cudaEventDestroy(g_shared_events[j]);
     g_shared_resources_init = false;
 }
 
 // MLP (Feed-Forward Network) implementation
 MLP::MLP(
     const std::string& w1_file, const std::string& w2_file,
-    const std::string& w3_file, int device_id)
-    : device_id_(device_id) {
+    const std::string& w3_file, int device_id) {
+    // device_id parameter kept for compatibility but not used (single GPU mode)
+    (void)device_id;
     w1_ = Tensor::load_from_file(w1_file);
     w2_ = Tensor::load_from_file(w2_file);
     w3_ = Tensor::load_from_file(w3_file);
@@ -359,11 +351,10 @@ void MLP::forward(const Tensor& x, Tensor& y, cudaStream_t stream) {
     // Flatten batch and seq_len
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
 
-    // shared resources for current device
-    int dev = device_id_;
-    cudaStream_t stream_aux = g_shared_streams[dev][0];
-    cudaEvent_t event_main_ready = g_shared_events[dev][0];
-    cudaEvent_t event_aux_done = g_shared_events[dev][1];
+    // Use shared resources for GPU 0
+    cudaStream_t stream_aux = g_shared_streams[0];
+    cudaEvent_t event_main_ready = g_shared_events[0];
+    cudaEvent_t event_aux_done = g_shared_events[1];
     
     // Record event to ensure input data is ready for aux stream
     CHECK_CUDA(cudaEventRecord(event_main_ready, stream));
@@ -388,11 +379,11 @@ void MLP::forward(const Tensor& x, Tensor& y, cudaStream_t stream) {
     // hidden = gate_silu * up
     Tensor hidden({batch * seq_len, intermediate_size});
     tensor_ops::mul(gate_silu, up, hidden, stream);
-    
+
     // y = hidden @ w2.T
     Tensor y_flat({batch * seq_len, hidden_size});
     tensor_ops::matmul_transposed(hidden, w2_, y_flat, stream);
-    
+
     // Reshape and assign to output
     y_flat.reshape({batch, seq_len, hidden_size});
     y = std::move(y_flat);
@@ -416,18 +407,10 @@ SparseMoeBlock::SparseMoeBlock(int layer_idx) {
         ss_w3 << "layers." << layer_idx
             << ".feed_forward.experts." << i << ".w3.weight";
 
-        // allocate experts for expert parallelism
-        int expert_device = i % NUM_GPUS;
         experts_.push_back(std::make_unique<MLP>(
-            ss_w1.str(), ss_w2.str(), ss_w3.str(), expert_device));
+            ss_w1.str(), ss_w2.str(), ss_w3.str(), 0));
     }
 
-    // Assign experts to 4 GPUs in a round-robin fashion (expert parallelism)
-    expert_devices_.resize(NUM_EXPERTS);
-    for (size_t i = 0; i < NUM_EXPERTS; i++) {
-        expert_devices_[i] = static_cast<int>(i % NUM_GPUS);
-    }
-    
     // Load expert bias if used
     if (USE_EXPERT_BIAS) {
         std::stringstream ss_bias;
@@ -497,191 +480,112 @@ void SparseMoeBlock::forward(
     size_t seq_len = x.size(1);
     size_t hidden_size = x.size(2);
     size_t num_tokens = batch * seq_len;
-    const int base_device = 0;
+    const int device = 0;  // All operations on GPU 0
+
+    CHECK_CUDA(cudaSetDevice(device));
 
     // Flatten
     Tensor x_flat = x.view({num_tokens, hidden_size});
-    x_flat.to_device(base_device, stream);
+    x_flat.to_device(device, stream);
 
-    // Compute router logits (base device)
-    CHECK_CUDA(cudaSetDevice(base_device));
+    // Compute router logits
     router_logits = Tensor({num_tokens, NUM_EXPERTS});
     tensor_ops::matmul_transposed(x_flat, gate_, router_logits, stream);
 
-    // Route tokens (base device)
+    // Route tokens
     std::vector<int> top_k_indices;
     std::vector<float> top_k_weights;
     route_tokens(router_logits, top_k_indices, top_k_weights, stream);
 
     // Bucket tokens per expert (host)
-    std::vector<std::vector<size_t>> tokens_per_expert(NUM_EXPERTS);
+    std::vector<std::vector<int>> tokens_per_expert(NUM_EXPERTS);
     std::vector<std::vector<float>> weights_per_expert(NUM_EXPERTS);
     for (size_t t = 0; t < num_tokens; t++) {
         for (size_t k = 0; k < NUM_EXPERTS_PER_TOK; k++) {
             int expert_idx = top_k_indices[t * NUM_EXPERTS_PER_TOK + k];
             float weight = top_k_weights[t * NUM_EXPERTS_PER_TOK + k];
-            tokens_per_expert[expert_idx].push_back(t);
+            tokens_per_expert[expert_idx].push_back(static_cast<int>(t));
             weights_per_expert[expert_idx].push_back(weight);
         }
     }
 
-    // Group experts by device
-    std::vector<std::vector<size_t>> experts_on_device(NUM_GPUS);
-    for (size_t e = 0; e < NUM_EXPERTS; e++) {
-        int dev = expert_devices_[e];
-        if (tokens_per_expert[e].size() > 0) {
-            experts_on_device[dev].push_back(e);
-        }
-    }
-
-    // Copy x_flat to GPUs
-    std::vector<Tensor> x_flat_per_gpu(NUM_GPUS);
-    for (int dev = 0; dev < NUM_GPUS; dev++) {
-        if (!experts_on_device[dev].empty()) {
-            x_flat_per_gpu[dev] = x_flat.copy();
-            x_flat_per_gpu[dev].to_device(dev, stream);
-        }
-    }
-
-    // Expert outputs and token indices per GPU
-    std::vector<std::vector<Tensor>> expert_outputs(NUM_GPUS);
-    std::vector<std::vector<std::vector<size_t>>> expert_token_lists(NUM_GPUS);
-    std::vector<std::vector<std::vector<float>>> expert_weight_lists(NUM_GPUS);
-
-    for (int dev = 0; dev < NUM_GPUS; dev++) {
-        expert_outputs[dev].resize(experts_on_device[dev].size());
-        expert_token_lists[dev].resize(experts_on_device[dev].size());
-        expert_weight_lists[dev].resize(experts_on_device[dev].size());
-    }
-
-    // Parallel execution across 4 GPUs using OpenMP
-    #pragma omp parallel num_threads(NUM_GPUS)
-    {
-        int dev = omp_get_thread_num();
-        CHECK_CUDA(cudaSetDevice(dev));
-
-        // Create a local stream for current GPU
-        cudaStream_t local_stream;
-        CHECK_CUDA(cudaStreamCreateWithFlags(&local_stream, cudaStreamNonBlocking));
-
-        std::vector<int*> ptrs_to_free;
-
-        // Process each expert on current GPU
-        for (size_t i = 0; i < experts_on_device[dev].size(); i++) {
-            size_t expert_idx = experts_on_device[dev][i];
-            const auto& token_list = tokens_per_expert[expert_idx];
-            const auto& weight_list = weights_per_expert[expert_idx];
-            size_t tok_count = token_list.size();
-
-            if (tok_count == 0) continue;
-
-            // Store token list and weights (for scatter)
-            expert_token_lists[dev][i] = token_list;
-            expert_weight_lists[dev][i] = weight_list;
-
-            // Expert input on GPU
-            Tensor expert_in({tok_count, 1, hidden_size});
-            expert_in.to_device(dev, local_stream);
-
-            // Gather expert input with kernel
-            const float* src = x_flat_per_gpu[dev].device_data();
-            float* dst = expert_in.device_data();
-            int* d_indices;
-            CHECK_CUDA(cudaMalloc(&d_indices, tok_count * sizeof(int)));
-
-            std::vector<int> indices_vec(tok_count);
-            for(size_t k=0; k<tok_count; ++k) indices_vec[k] = (int)token_list[k];
-
-            CHECK_CUDA(cudaMemcpyAsync(
-                d_indices, indices_vec.data(), tok_count * sizeof(int),
-                cudaMemcpyHostToDevice, local_stream));
-
-            size_t total_elements = tok_count * hidden_size;
-            dim3 block(256);
-            dim3 grid((total_elements + 255) / 256);
-
-            gather_expert_input_kernel<<<grid, block, 0, local_stream>>>(
-                src, dst, d_indices, tok_count, hidden_size
-            );
-
-            ptrs_to_free.push_back(d_indices);
-            expert_in.mark_device_dirty();
-
-            // Execute expert
-            Tensor expert_out;
-            experts_[expert_idx]->forward(expert_in, expert_out, local_stream);
-
-            // Keep output on current GPU
-            expert_outputs[dev][i] = std::move(expert_out);
-        }
-        
-        CHECK_CUDA(cudaStreamSynchronize(local_stream));
-        for(int* ptr : ptrs_to_free) CHECK_CUDA(cudaFree(ptr));
-        CHECK_CUDA(cudaStreamDestroy(local_stream));
-    }
-
-    // Initialize output tensor (base device)
+    // Initialize output tensor
     y = Tensor({batch, seq_len, hidden_size});
-    y.to_device(base_device);
-    CHECK_CUDA(cudaSetDevice(base_device));
-    CHECK_CUDA(cudaMemset(
-        y.device_data(), 0, num_tokens * hidden_size * sizeof(float)));
+    y.to_device(device, stream);
+    CHECK_CUDA(cudaMemsetAsync(
+        y.device_data(), 0, num_tokens * hidden_size * sizeof(float), stream));
     y.mark_device_dirty();
 
-    // Accumulate results using kernel
-    for (int dev = 0; dev < NUM_GPUS; dev++) {
-        for (size_t i = 0; i < experts_on_device[dev].size(); i++) {
-            const auto& token_list = expert_token_lists[dev][i];
-            const auto& weight_list = expert_weight_lists[dev][i];
-            Tensor& expert_out = expert_outputs[dev][i];
+    // Pre-allocate buffers (max size = num_tokens)
+    int* h_indices;
+    int* d_indices;
+    float* h_weights;
+    float* d_weights;
+    CHECK_CUDA(cudaMallocHost(&h_indices, num_tokens * sizeof(int)));
+    CHECK_CUDA(cudaMalloc(&d_indices, num_tokens * sizeof(int)));
+    CHECK_CUDA(cudaMallocHost(&h_weights, num_tokens * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_weights, num_tokens * sizeof(float)));
 
-            if (expert_out.size() == 0) continue;
+    // Pre-allocate expert input buffer
+    Tensor expert_in_buf({num_tokens, 1, hidden_size}, device);
 
-            size_t tok_count = token_list.size();
+    // Process each expert sequentially on GPU 0
+    for (size_t expert_idx = 0; expert_idx < NUM_EXPERTS; expert_idx++) {
+        const auto& token_list = tokens_per_expert[expert_idx];
+        const auto& weight_list = weights_per_expert[expert_idx];
+        size_t tok_count = token_list.size();
 
-            // Copy expert_out to base device if on different GPU
-            if (dev != base_device) {
-                expert_out.to_device(base_device, stream);
-            }
-            CHECK_CUDA(cudaSetDevice(base_device));
+        if (tok_count == 0) continue;
 
-            // Prepare token_ids and weights arrays on GPU
-            int* d_token_ids;
-            float* d_weights;
-            CHECK_CUDA(cudaMalloc(&d_token_ids, tok_count * sizeof(int)));
-            CHECK_CUDA(cudaMalloc(&d_weights, tok_count * sizeof(float)));
+        // Gather expert input with kernel
+        Tensor expert_in = expert_in_buf.view({tok_count, 1, hidden_size});
+        const float* src = x_flat.device_data();
+        float* dst = expert_in.device_data();
 
-            // Copy token_ids and weights to device
-            std::vector<int> token_ids_vec(tok_count);
-            for (size_t idx = 0; idx < tok_count; idx++) {
-                token_ids_vec[idx] = static_cast<int>(token_list[idx]);
-            }
-            CHECK_CUDA(cudaMemcpyAsync(
-                d_token_ids, token_ids_vec.data(),
-                tok_count * sizeof(int), cudaMemcpyHostToDevice, stream));
-            CHECK_CUDA(cudaMemcpyAsync(
-                d_weights, weight_list.data(),
-                tok_count * sizeof(float), cudaMemcpyHostToDevice, stream));
+        std::memcpy(h_indices, token_list.data(), tok_count * sizeof(int));
+        CHECK_CUDA(cudaMemcpyAsync(
+            d_indices, h_indices, tok_count * sizeof(int),
+            cudaMemcpyHostToDevice, stream));
 
-            // Launch scatter-add kernel
-            size_t total = tok_count * hidden_size;
-            dim3 block(256);
-            dim3 grid((total + 255) / 256);
+        size_t total_elements = tok_count * hidden_size;
+        dim3 block(256);
+        dim3 grid((total_elements + 255) / 256);
 
-            weighted_scatter_add_kernel<<<grid, block, 0, stream>>>(
-                y.device_data(), expert_out.device_data(),
-                d_token_ids, d_weights,
-                tok_count, hidden_size);
+        gather_expert_input_kernel<<<grid, block, 0, stream>>>(
+            src, dst, d_indices, tok_count, hidden_size);
 
-            // Wait for kernel to finish -> free memory
-            CHECK_CUDA(cudaStreamSynchronize(stream));
-            CHECK_CUDA(cudaFree(d_token_ids));
-            CHECK_CUDA(cudaFree(d_weights));
-        }
+        expert_in.mark_device_dirty();
+
+        // Execute expert
+        Tensor expert_out;
+        experts_[expert_idx]->forward(expert_in, expert_out, stream);
+
+        // Scatter-add results
+        std::memcpy(h_indices, token_list.data(), tok_count * sizeof(int));
+        std::memcpy(h_weights, weight_list.data(), tok_count * sizeof(float));
+
+        CHECK_CUDA(cudaMemcpyAsync(
+            d_indices, h_indices,
+            tok_count * sizeof(int), cudaMemcpyHostToDevice, stream));
+        CHECK_CUDA(cudaMemcpyAsync(
+            d_weights, h_weights,
+            tok_count * sizeof(float), cudaMemcpyHostToDevice, stream));
+
+        size_t total = tok_count * hidden_size;
+        grid = dim3((total + 255) / 256);
+
+        weighted_scatter_add_kernel<<<grid, block, 0, stream>>>(
+            y.device_data(), expert_out.device_data(),
+            d_indices, d_weights,
+            tok_count, hidden_size);
     }
 
-    // Keep on base device
-    CHECK_CUDA(cudaSetDevice(base_device));
+    // Free buffers
+    CHECK_CUDA(cudaFree(d_indices));
+    CHECK_CUDA(cudaFree(d_weights));
+    CHECK_CUDA(cudaFreeHost(h_indices));
+    CHECK_CUDA(cudaFreeHost(h_weights));
+
     y.reshape({batch, seq_len, hidden_size});
 }
 
@@ -707,8 +611,9 @@ Attention::Attention(int layer_idx) : layer_idx_(layer_idx) {
 Attention::~Attention() {
 }
 
-void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
-                       const Tensor* attention_mask, Tensor& output, cudaStream_t stream) {
+void Attention::forward(
+    const Tensor& x, const Tensor& cos, const Tensor& sin,
+    const Tensor* attention_mask, Tensor& output, cudaStream_t stream) {
     // x: (batch, seq_len, hidden_size)
     size_t batch = x.size(0);
     size_t seq_len = x.size(1);
@@ -717,13 +622,12 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
     // Flatten
     Tensor x_flat = x.view({batch * seq_len, hidden_size});
 
-    // Get shared resources for this device
-    int dev = q_proj_.device_id();
-    cudaStream_t stream_k = g_shared_streams[dev][0];
-    cudaStream_t stream_v = g_shared_streams[dev][1];
-    cudaEvent_t event_main_ready = g_shared_events[dev][0];
-    cudaEvent_t event_k_done = g_shared_events[dev][1];
-    cudaEvent_t event_v_done = g_shared_events[dev][2];
+    // Use shared resources for GPU 0
+    cudaStream_t stream_k = g_shared_streams[0];
+    cudaStream_t stream_v = g_shared_streams[1];
+    cudaEvent_t event_main_ready = g_shared_events[0];
+    cudaEvent_t event_k_done = g_shared_events[1];
+    cudaEvent_t event_v_done = g_shared_events[2];
 
     // Record event to ensure input data is ready for aux streams
     CHECK_CUDA(cudaEventRecord(event_main_ready, stream));
@@ -754,9 +658,12 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
     tensor_ops::matmul_transposed(x_flat, v_proj_, v_proj_out, stream_v);
 
     // Reshape to (batch, seq, num_heads, head_dim) for layernorm (multi-stream)
-    tensor_ops::reshape_for_layernorm(q_proj_out, q_reshaped, batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM, stream);
-    tensor_ops::reshape_for_layernorm(k_proj_out, k_reshaped, batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM, stream_k);
-    tensor_ops::reshape_for_layernorm(v_proj_out, v_reshaped, batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM, stream_v);
+    tensor_ops::reshape_for_layernorm(
+        q_proj_out, q_reshaped, batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM, stream);
+    tensor_ops::reshape_for_layernorm(
+        k_proj_out, k_reshaped, batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM, stream_k);
+    tensor_ops::reshape_for_layernorm(
+        v_proj_out, v_reshaped, batch, seq_len, NUM_KEY_VALUE_HEADS, HEAD_DIM, stream_v);
 
     // Apply layernorm to Q and K (normalizes over last dim = head_dim)
     q_layernorm_->forward(q_reshaped, q_normed, stream);
@@ -799,10 +706,9 @@ void Attention::forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
     tensor_ops::matmul_transposed(attn_flat, o_proj_, output_flat, stream);
 
     // Copy result to output buffer
-    // If output is already allocated (from buffer pool), use it directly
     if (output.size() == 0) {
         output = Tensor({batch, seq_len, hidden_size});
-        output.to_device(dev, stream);
+        output.to_device(0, stream);
     }
     CHECK_CUDA(cudaMemcpyAsync(output.device_data(), output_flat.device_data(),
                batch * seq_len * hidden_size * sizeof(float), cudaMemcpyDeviceToDevice, stream));
@@ -960,7 +866,7 @@ void DecoderLayer::forward(
     // MoE block or dense MLP
     Tensor ffn_output;
     if (moe_block_) {
-        // MoE layer (layers >= 2) -> expert parallelism
+        // MoE layer (layers >= 2)
         Tensor router_logits;
         moe_block_->forward(normed_hidden, ffn_output, router_logits, stream);
     } else {
@@ -1023,8 +929,6 @@ void LFM2Model::load_layers() {
     layers_.reserve(NUM_HIDDEN_LAYERS);
     for (size_t i = 0; i < NUM_HIDDEN_LAYERS; i++) {
         bool is_attention = (LAYER_TYPES[i] == 0);
-        // Keep non-MoE work on a base device (0)
-        // Expert parallelism spreads work across devices inside MoE blocks.
         int device_id = 0;
         DEBUG_PRINTLN(
             "  Layer " << i << ": " << (is_attention ? "Attention" : "Conv"));

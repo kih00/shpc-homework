@@ -37,12 +37,23 @@ Tensor::Tensor() : size_(0), host_data_(nullptr), device_data_(nullptr),
                    owns_host_(false), owns_device_(false), device_id_(0),
                    host_dirty_(false), device_dirty_(false) {}
 
-Tensor::Tensor(const std::vector<size_t>& shape) 
+Tensor::Tensor(const std::vector<size_t>& shape)
         : shape_(shape), host_data_(nullptr), device_data_(nullptr),
             owns_host_(true), owns_device_(false), device_id_(0),
             host_dirty_(false), device_dirty_(false) {
     size_ = compute_size();
     allocate_host();
+}
+
+Tensor::Tensor(const std::vector<size_t>& shape, int device_id)
+        : shape_(shape), host_data_(nullptr), device_data_(nullptr),
+            owns_host_(false), owns_device_(true), device_id_(device_id),
+            host_dirty_(false), device_dirty_(true) {
+    size_ = compute_size();
+    if (size_ > 0) {
+        CHECK_CUDA(cudaSetDevice(device_id_));
+        CHECK_CUDA(cudaMalloc(&device_data_, size_ * sizeof(float)));
+    }
 }
 
 Tensor::Tensor(const std::vector<size_t>& shape, float* data, bool copy)
@@ -224,15 +235,18 @@ void Tensor::reshape(const std::vector<size_t>& new_shape) {
 }
 
 Tensor Tensor::view(const std::vector<size_t>& new_shape) const {
-    // Verify new shape has same number of elements
+    // Verify new shape has compatible number of elements (new_size <= size_)
     size_t new_size = std::accumulate(new_shape.begin(), new_shape.end(), 1ULL, std::multiplies<size_t>());
-    if (new_size != size_) {
-        throw std::invalid_argument("New shape must have same number of elements");
+    if (new_size > size_) {
+        throw std::invalid_argument("View shape cannot exceed original tensor size");
     }
 
     // Create a view that shares data with this tensor (no copy)
-    ensure_host_data();
-    Tensor result(new_shape, host_data_, false);  // false means don't copy data
+    Tensor result;
+    result.shape_ = new_shape;
+    result.size_ = new_size;
+    result.host_data_ = host_data_;  // Share host pointer (may be nullptr for device-only)
+    result.owns_host_ = false;
     result.device_data_ = device_data_;
     result.device_id_ = device_id_;
     result.owns_device_ = false;
@@ -534,4 +548,3 @@ void Tensor::sync_host_from_device(cudaStream_t stream) const {
     device_dirty_ = false;
     host_dirty_ = false;
 }
-

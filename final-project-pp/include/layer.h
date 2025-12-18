@@ -103,7 +103,6 @@ private:
     Tensor w1_;  // up projection
     Tensor w3_;  // gate projection
     Tensor w2_;  // down projection
-    int device_id_;
 };
 
 // Sparse MoE Block
@@ -115,7 +114,6 @@ public:
 private:
     Tensor gate_;  // router
     std::vector<std::unique_ptr<MLP>> experts_;
-    std::vector<int> expert_devices_;
     Tensor expert_bias_;  // optional
     
     void route_tokens(const Tensor& router_logits, std::vector<int>& top_k_indices,

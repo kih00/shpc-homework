@@ -3,7 +3,7 @@
         {
             "includePath": [
                 "${workspaceFolder}/**",
-                "${workspaceFolder}/final-project/include",
+                "${workspaceFolder}/final-project-**/include",
                 "/usr/local/cuda/include"
             ],
             "defines": [
