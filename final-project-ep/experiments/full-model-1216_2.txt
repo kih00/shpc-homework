@@ -1,0 +1,304 @@
+[개선사항 및 정리] 후술
+$ ./run.sh -v -w -n 256
+=============================================
+ Model: LFM2-8B-A1B
+---------------------------------------------
+ Validation: ON
+ Warm-up: ON
+ Number of samples: 256
+=============================================
+
+Initializing inputs and outputs...Done!
+Input file info:
+  Total samples: 1024
+  Sequence length: 16
+  Processing samples: 256
+
+Loading model from /mnt/ramdisk/model.bin...Loading LFM2-8B-A1B model from /mnt/ramdisk/model.bin
+Loading model index from /mnt/ramdisk/model.bin
+  Number of tensors: 2302
+  Index loaded successfully
+Loading embeddings...
+  Embeddings shape: 65536 x 2048
+Loading 24 decoder layers...
+  Layer 0: Conv
+  Layer 1: Conv
+  Layer 2: Attention
+  Layer 3: Conv
+  Layer 4: Conv
+  Layer 5: Conv
+  Layer 6: Attention
+  Layer 7: Conv
+  Layer 8: Conv
+  Layer 9: Conv
+  Layer 10: Attention
+  Layer 11: Conv
+  Layer 12: Conv
+  Layer 13: Conv
+  Layer 14: Attention
+  Layer 15: Conv
+  Layer 16: Conv
+  Layer 17: Conv
+  Layer 18: Attention
+  Layer 19: Conv
+  Layer 20: Conv
+  Layer 21: Attention
+  Layer 22: Conv
+  Layer 23: Conv
+Loading output layers...
+  Using tied weights for LM head
+Model loaded successfully!
+Warming up...
+Forward pass: batch=256, seq_len=16
+  Layer 0 forward time: 0.978288 seconds
+  Layer 1 forward time: 0.955358 seconds
+  Layer 2 forward time: 1.30672 seconds
+  Layer 3 forward time: 1.30477 seconds
+  Layer 4 forward time: 1.35514 seconds
+  Layer 5 forward time: 1.19402 seconds
+  Layer 6 forward time: 1.20699 seconds
+  Layer 7 forward time: 1.36128 seconds
+  Layer 8 forward time: 1.23984 seconds
+  Layer 9 forward time: 1.26764 seconds
+  Layer 10 forward time: 1.401 seconds
+  Layer 11 forward time: 1.28263 seconds
+  Layer 12 forward time: 1.22116 seconds
+  Layer 13 forward time: 1.22164 seconds
+  Layer 14 forward time: 1.22074 seconds
+  Layer 15 forward time: 1.20888 seconds
+  Layer 16 forward time: 1.19713 seconds
+  Layer 17 forward time: 1.19311 seconds
+  Layer 18 forward time: 1.19165 seconds
+  Layer 19 forward time: 1.20715 seconds
+  Layer 20 forward time: 1.16939 seconds
+  Layer 21 forward time: 1.16576 seconds
+  Layer 22 forward time: 1.20764 seconds
+  Layer 23 forward time: 1.1611 seconds
+Done!
+
+Generating...
+Forward pass: batch=256, seq_len=16
+  Layer 0 forward time: 0.83919 seconds
+  Layer 1 forward time: 0.847385 seconds
+  Layer 2 forward time: 0.680512 seconds
+  Layer 3 forward time: 0.615385 seconds
+  Layer 4 forward time: 0.584702 seconds
+  Layer 5 forward time: 0.652974 seconds
+  Layer 6 forward time: 0.626133 seconds
+  Layer 7 forward time: 0.648629 seconds
+  Layer 8 forward time: 0.628733 seconds
+  Layer 9 forward time: 0.599753 seconds
+  Layer 10 forward time: 0.708329 seconds
+  Layer 11 forward time: 0.645971 seconds
+  Layer 12 forward time: 0.652899 seconds
+  Layer 13 forward time: 0.698816 seconds
+  Layer 14 forward time: 0.643492 seconds
+  Layer 15 forward time: 0.611637 seconds
+  Layer 16 forward time: 0.6747 seconds
+  Layer 17 forward time: 0.589374 seconds
+  Layer 18 forward time: 0.578969 seconds
+  Layer 19 forward time: 0.625307 seconds
+  Layer 20 forward time: 0.626105 seconds
+  Layer 21 forward time: 0.654121 seconds
+  Layer 22 forward time: 0.651423 seconds
+  Layer 23 forward time: 0.618308 seconds
+Done!
+Elapsed time: 16.029843 (sec)
+Throughput: 15.970213 (samples/sec)
+
+Saving outputs to data/outputs.bin...Done!
+===========================================================
+Validating against reference answers...
+===========================================================
+
+Comparing 256 samples...
+Threshold: 1e-3
+
+Top-1 Prediction Accuracy: 100% (256/256)
+VALID
+
+------------------
+📊 현재 적용된 최적화/병렬화 기법
+
+  1. GPU 병렬화 (CUDA Kernels)
+
+  | 기법                 | 위치             | 설명                                       |
+  |----------------------|------------------|--------------------------------------------|
+  | Tiled MatMul         | layer.cu:29-122  | 32x32 타일 + 공유 메모리 사용              |
+  | Warp-level Reduction | layer.cu:168-230 | Softmax에서 __shfl_down_sync 사용          |
+  | Fused Kernels        | layer.cu:407-426 | transpose_split_BCx - transpose+split 융합 |
+
+  2. Multi-GPU (Expert Parallelism)
+
+  | 기법                    | 위치              | 설명                                      |
+  |-------------------------|-------------------|-------------------------------------------|
+  | Round-robin Expert 배치 | model.cu:150-154  | 32개 expert를 4개 GPU에 분산 (expert % 4) |
+  | OpenMP 병렬 실행        | model.cu:269-301  | 4 GPU에서 expert 동시 실행                |
+  | Device-to-Device 복사   | tensor.cu:523-564 | P2P GPU 간 데이터 전송                    |
+
+  3. 메모리 최적화
+
+  | 기법                  | 위치              | 설명                                   |
+  |-----------------------|-------------------|----------------------------------------|
+  | Pinned Memory         | main.cpp:140,161  | 입출력에 cudaMallocHost 사용           |
+  | Lazy Host/Device Sync | tensor.cu:424-437 | dirty flag로 불필요한 복사 방지        |
+  | View (Zero-copy)      | tensor.cu:226-242 | reshape시 데이터 복사 없이 포인터 공유 |
+
+  4. 연산 융합
+
+  | 기법            | 위치             | 설명                                |
+  |-----------------|------------------|-------------------------------------|
+  | Fused Attention | layer.cu:451-510 | QK^T → softmax → V 한 커널에서 처리 |
+  | Fused RoPE      | layer.cu:267-299 | Q, K 동시에 RoPE 적용               |
+
+  ---
+  ⚠️ 비효율적이거나 오류 발생 가능한 부분
+
+  1. 심각한 성능 병목
+
+  (1) Embedding Lookup - CPU 순차 처리
+
+  // model.cu:667-675
+  for (size_t b = 0; b < batch; b++) {
+      for (size_t i = 0; i < seq_len; i++) {
+          for (size_t j = 0; j < HIDDEN_SIZE; j++) {
+              hidden_states.at(b, i, j) = embed_tokens_.at(token_id, j);
+          }
+      }
+  }
+  문제: 3중 for 루프가 CPU에서 실행, GPU 커널로 교체 필요
+
+  (2) Route Tokens Kernel - 단일 스레드 처리
+
+  // model.cu:33
+  if (threadIdx.x != 0) return; // only one thread does work per token
+  문제: 블록당 1개 스레드만 사용 → GPU 활용도 매우 낮음
+
+  (3) MoE 결과 누적 - CPU 순차 처리
+
+  // model.cu:318-326
+  for (size_t h = 0; h < hidden_size; h++) {
+      y_row[h] += w * out_row[h];  // CPU에서 순차 누적
+  }
+  문제: hidden_size=2048을 CPU에서 순차 처리
+
+  (4) Last Hidden 추출 - CPU 루프
+
+  // model.cu:715-718
+  for (size_t b = 0; b < batch; b++) {
+      for (size_t i = 0; i < HIDDEN_SIZE; i++) {
+          last_hidden.at(b, 0, i) = normed_output.at(b, seq_len - 1, i);
+      }
+  }
+
+  2. 불필요한 동기화
+
+  (1) 과도한 cudaDeviceSynchronize
+
+  // layer.cu:526, 542, 556, ... (거의 모든 연산 후)
+  CHECK_CUDA(cudaDeviceSynchronize());
+  문제: 매 커널 실행 후 동기화 → GPU 파이프라인 단절
+
+  (2) MoE에서 Host-Device 왕복
+
+  // model.cu:202-207 - route_tokens 결과를 Host로 복사
+  CHECK_CUDA(cudaMemcpy(top_k_indices.data(), d_topk_indices, ...));
+  // model.cu:247 - x_flat을 Host로 복사
+  x_flat.to_host();
+  // model.cu:296 - expert 결과를 Host로 복사
+  expert_out.to_host();
+  문제: Device→Host→Device 왕복이 매 MoE 블록마다 발생
+
+  3. 잠재적 오류
+
+  (1) RMSNorm 커널 - 단일 스레드 per row
+
+  // layer.cu:237-246
+  size_t row = blockIdx.x * blockDim.x + threadIdx.x;
+  for (size_t j = 0; j < hidden; ++j) sum += x[j] * x[j];  // 순차 loop
+  문제: hidden=2048을 한 스레드가 처리 → 매우 느림
+
+  (2) Attention Shared Memory 제한
+
+  // layer.cu:806-811
+  if (shared_mem_size > 48 * 1024) {
+      threads_per_block = (48 * 1024) / (seq_len * sizeof(float));
+  문제: seq_len이 크면 스레드 수가 1까지 줄어들 수 있음
+
+  (3) ShortConv Bias 추가 - CPU 루프
+
+  // model.cu:477-482
+  for (size_t i = 0; i < batch * seq_len; i++) {
+      for (size_t j = 0; j < 3 * hidden_size; j++) {
+          in_proj_out.at(i, j) += in_proj_bias_[j];
+      }
+  }
+
+  4. MPI 미사용
+
+  // main.cpp:201-218
+  if (mpi_rank == 0) {
+      // Only rank 0 does computation
+  }
+  문제: MPI가 초기화되어 있지만 rank 0만 연산 → 멀티 노드 미활용
+
+  ---
+  🚀 개선 가능한 점
+
+  1. 즉시 개선 가능 (High Impact)
+
+  | 항목             | 개선 방법                                 | 예상 효과  |
+  |------------------|-------------------------------------------|------------|
+  | Embedding Lookup | GPU 커널로 교체 (gather_embedding_kernel) | 5-10x 빠름 |
+  | Route Tokens     | Parallel reduction으로 top-k 구현         | 10x+ 빠름  |
+  | RMSNorm          | Warp reduction 사용                       | 5-10x 빠름 |
+  | MoE 결과 누적    | GPU atomic add 또는 reduction 커널        | 5x+ 빠름   |
+  | Bias 추가        | Fused kernel 또는 cuBLAS bias 옵션        | 2-3x 빠름  |
+
+  2. 동기화 최적화
+
+  | 항목                       | 개선 방법                                  |
+  |----------------------------|--------------------------------------------|
+  | cudaDeviceSynchronize 제거 | CUDA Streams 사용, 필요한 곳만 동기화      |
+  | MoE Host 왕복 제거         | 전체 과정을 GPU에서 처리, 결과만 최종 복사 |
+
+  3. 멀티 노드 확장 (MPI 활용)
+
+  현재: [Node 0, GPU 0-3] 만 사용
+  목표: [Node 0-3] x [GPU 0-3] = 16 GPU
+
+  방안 1: Data Parallelism
+  - 각 노드가 서로 다른 샘플 처리
+  - MPI_Allgather로 결과 수집
+
+  방안 2: Expert Parallelism 확장  
+  - 32 experts / 16 GPUs = 2 experts/GPU
+  - 노드 간 All2All 통신으로 토큰 분배
+
+  방안 3: Pipeline Parallelism
+  - 레이어를 노드별로 분배 (e.g., 노드 0: layer 0-5, ...)
+  - MPI_Send/Recv로 activation 전달
+
+  4. 추가 최적화
+
+  | 항목            | 설명                                               |
+  |-----------------|----------------------------------------------------|
+  | cuBLAS 사용     | 커스텀 matmul → cublasSgemm으로 교체               |
+  | Flash Attention | 현재 attention 커널을 FlashAttention 알고리즘으로  |
+  | FP16/BF16       | Mixed precision으로 메모리/연산 절감               |
+  | CUDA Graphs     | 반복 연산을 그래프로 캡처하여 launch overhead 제거 |
+  | NCCL            | Multi-GPU 통신을 NCCL로 최적화                     |
+
+  ---
+  요약
+
+  현재 상태: 싱글 노드 4-GPU Expert Parallelism 기본 구현
+  주요 병목: CPU fallback 코드, 과도한 동기화, Host-Device 왕복
+  멀티 노드: MPI 초기화만 되어 있고 실제 분산 처리 없음
+
+  우선순위로는:
+  1. CPU 루프들을 GPU 커널로 교체
+  2. 불필요한 동기화 제거 (CUDA Streams 도입)
+  3. MoE에서 Host 왕복 제거
+  4. MPI를 통한 멀티 노드 확장
+

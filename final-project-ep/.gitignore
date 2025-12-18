@@ -1,0 +1,38 @@
+# Compiled objects
+*.o
+*.d
+obj/
+
+# Executable
+main
+
+# Converted model data
+data/*.bin
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# nsys report
+*.nsys-rep
+
+# IDE files
+.vscode/
+.idea/
+.clangd
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+dist/
+*.egg-info/

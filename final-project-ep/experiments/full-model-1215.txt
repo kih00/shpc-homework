@@ -1,0 +1,215 @@
+개선사항: expert paralellism으로 수정
+$ ./run.sh -v -n 4
+=============================================
+ Model: LFM2-8B-A1B
+---------------------------------------------
+ Validation: ON
+ Warm-up: OFF
+ Number of samples: 4
+=============================================
+
+Initializing inputs and outputs...Done!
+Input file info:
+  Total samples: 1024
+  Sequence length: 16
+  Processing samples: 4
+
+Loading model from /mnt/ramdisk/model.bin...Loading LFM2-8B-A1B model from /mnt/ramdisk/model.bin
+Loading model index from /mnt/ramdisk/model.bin
+  Number of tensors: 2302
+  Index loaded successfully
+Loading embeddings...
+  Embeddings shape: 65536 x 2048
+Loading 24 decoder layers...
+  Layer 0: Conv
+  Layer 1: Conv
+  Layer 2: Attention
+  Layer 3: Conv
+  Layer 4: Conv
+  Layer 5: Conv
+  Layer 6: Attention
+  Layer 7: Conv
+  Layer 8: Conv
+  Layer 9: Conv
+  Layer 10: Attention
+  Layer 11: Conv
+  Layer 12: Conv
+  Layer 13: Conv
+  Layer 14: Attention
+  Layer 15: Conv
+  Layer 16: Conv
+  Layer 17: Conv
+  Layer 18: Attention
+  Layer 19: Conv
+  Layer 20: Conv
+  Layer 21: Attention
+  Layer 22: Conv
+  Layer 23: Conv
+Loading output layers...
+  Using tied weights for LM head
+Model loaded successfully!
+Generating...Done!
+Elapsed time: 35.710101 (sec)
+Throughput: 0.112013 (samples/sec)
+
+Saving outputs to data/outputs.bin...Done!
+===========================================================
+Validating against reference answers...
+===========================================================
+
+Comparing 4 samples...
+Threshold: 1e-3
+
+Top-1 Prediction Accuracy: 100% (4/4)
+VALID
+
+---------------
+코드 분석 결과
+
+  1. 적용된 최적화 및 Parallelism 기법
+
+  1.1 GPU 커널 최적화 (layer.cu)
+
+  | 기법                   | 설명                                                         | 위치             |
+  |------------------------|--------------------------------------------------------------|------------------|
+  | Shared Memory Tiling   | matmul에서 32×32 타일을 사용해 global memory 접근 감소       | layer.cu:29-73   |
+  | Warp Shuffle Reduction | softmax에서 __shfl_down_sync()를 사용한 warp-level reduction | layer.cu:166-230 |
+  | Loop Unrolling         | #pragma unroll로 matmul 내부 루프 언롤링                     | layer.cu:62-65   |
+
+  1.2 Multi-GPU / Parallelism
+
+  | 기법                  | 설명                                             | 위치              |
+  |-----------------------|--------------------------------------------------|-------------------|
+  | Expert Parallelism    | 32개 expert를 4개 GPU에 round-robin 분배 (i % 4) | model.cu:80-84    |
+  | MPI 준비              | 멀티노드 확장을 위한 MPI 초기화/종료 코드 존재   | main.cpp:99-102   |
+  | Device-to-Device Copy | copy_to_device()로 GPU 간 데이터 이동 지원       | tensor.cu:399-440 |
+
+  1.3 메모리 관리
+
+  | 기법            | 설명                                                      | 위치              |
+  |-----------------|-----------------------------------------------------------|-------------------|
+  | Dirty Flag 패턴 | host_dirty_, device_dirty_로 불필요한 H↔D 복사 방지       | tensor.h:97-109   |
+  | Move Semantics  | Tensor에 move constructor/assignment로 불필요한 복사 방지 | tensor.cu:79-117  |
+  | Pinned Memory   | 입출력에 cudaMallocHost() 사용                            | main.cpp:142, 163 |
+
+  1.4 기타
+
+  | 기법                | 설명                                  | 위치             |
+  |---------------------|---------------------------------------|------------------|
+  | RoPE 캐싱           | cos/sin을 미리 계산하여 캐시          | layer.cu:594-599 |
+  | Binary Model Format | 모든 weight를 하나의 .bin 파일로 관리 | model_loader.cpp |
+
+  ---
+  2. 비효율적이거나 잘못 구현된 부분
+
+  2.1 🔴 Critical: 과도한 CPU-GPU 동기화
+
+  문제: 거의 모든 CUDA 커널 호출 후 즉시 cudaDeviceSynchronize() 호출
+  // layer.cu:355-358
+  matmul_kernel<<<grid, block>>>(...);
+  CHECK_CUDA(cudaDeviceSynchronize());  // ❌ 불필요한 동기화
+  c.mark_device_dirty();
+  c.to_host();  // ❌ 다시 CPU로 복사
+  영향: 커널 파이프라이닝 불가, GPU 활용률 저하
+
+  2.2 🔴 Critical: 결과를 매번 Host로 복사
+
+  문제: 모든 tensor_ops 함수가 c.to_host()를 호출
+  // layer.cu - matmul, matmul_transposed, add, mul, softmax... 모두 동일
+  c.mark_device_dirty();
+  c.to_host();  // ❌ 항상 Host로 복사
+  영향: PCIe 병목, GPU 연산의 장점 상실
+
+  2.3 🔴 Critical: Attention 연산이 대부분 CPU에서 수행
+
+  문제: Q@K^T, Softmax, Attn@V 연산이 4중 for 루프로 CPU에서 실행
+  // model.cu:335-370 - 전체가 CPU 연산
+  for (size_t b = 0; b < batch; b++) {
+      for (size_t h = 0; h < NUM_ATTENTION_HEADS; h++) {
+          // Compute Q @ K^T - CPU에서 수행!
+          for (size_t i = 0; i < seq_len; i++) {
+              for (size_t j = 0; j < seq_len; j++) {
+                  // ... ❌ 이 연산이 GPU가 아닌 CPU에서 수행됨
+
+  2.4 🟠 Major: Expert Parallelism이 실제로 병렬 실행되지 않음
+
+  문제: Expert들이 순차적으로 실행됨
+  // model.cu:195-229
+  for (int dev = 0; dev < EXPERT_PARALLEL_GPUS; dev++) {
+      CHECK_CUDA(cudaSetDevice(dev));
+      for (size_t expert_idx = 0; expert_idx < NUM_EXPERTS; expert_idx++) {
+          // ... 순차 실행 ❌
+          experts_[expert_idx].forward(expert_in, expert_out);
+          expert_out.to_host();  // ❌ 매번 Host로 복사
+  개선 방안: CUDA 스트림을 사용해 여러 GPU에서 동시 실행
+
+  2.5 🟠 Major: RMSNorm 커널 비효율
+
+  문제: 한 스레드가 hidden_size=2048 전체를 처리
+  // layer.cu:233-246
+  __global__ void rms_norm_kernel(...) {
+      size_t row = blockIdx.x * blockDim.x + threadIdx.x;
+      if (row < rows) {
+          for (size_t j = 0; j < hidden; ++j) sum += x[j] * x[j];  // ❌ 단일 스레드가 2048개 처리
+          for (size_t j = 0; j < hidden; ++j) y[j] = x[j] * rms * W[j];
+      }
+  }
+  개선 방안: Warp/block-level reduction 사용
+
+  2.6 🟠 Major: Reshape/Transpose가 CPU 루프로 수행
+
+  문제: Attention과 ShortConv에서 다수의 4중 루프 존재
+  // model.cu:279-293, 306-320 등
+  for (size_t b = 0; b < batch; b++) {
+      for (size_t s = 0; s < seq_len; s++) {
+          for (size_t h = 0; h < NUM_ATTENTION_HEADS; h++) {
+              for (size_t d = 0; d < HEAD_DIM; d++) {
+                  q_reshaped.at(b, s, h, d) = q_proj_out.at(...);  // ❌ CPU에서 수행
+
+  2.7 🟡 Minor: 임시 Tensor 과다 생성
+
+  문제: forward 함수마다 많은 임시 Tensor 생성
+  - Attention::forward: q_proj_out, k_proj_out, v_proj_out, q_reshaped, k_reshaped, v_reshaped, q_normed, k_normed, q, k, v, k_repeated, v_repeated, scores, attn_weights, attn_output, attn_flat... (17개+)
+  - 매번 cudaMalloc/cudaFree 발생 가능
+
+  2.8 🟡 Minor: Stream 미활용
+
+  문제: CUDA 스트림이 거의 사용되지 않음
+  // tensor.cu - 대부분 stream=0 (default stream)
+  void to_device(int device_id = 0, cudaStream_t stream = 0) const;
+
+  2.9 🟡 Minor: Routing이 CPU에서 수행
+
+  문제: route_tokens()가 완전히 CPU에서 수행됨
+  // model.cu:94-153 - 전부 CPU 연산
+  for (size_t t = 0; t < num_tokens; t++) {
+      // sigmoid, partial_sort 등 모두 CPU
+
+  ---
+  3. Skeleton 코드 대비 추가된 최적화 요약
+
+  | 항목        | Skeleton   | 현재 구현                 |
+  |-------------|------------|---------------------------|
+  | MatMul      | OpenMP CPU | CUDA Shared Memory Tiling |
+  | Softmax     | OpenMP CPU | CUDA Warp Shuffle         |
+  | RoPE        | OpenMP CPU | CUDA 커널                 |
+  | Conv1D      | OpenMP CPU | CUDA 커널                 |
+  | Expert 분배 | 없음       | 4 GPU Round-Robin         |
+  | Tensor 관리 | Host only  | Host/Device dirty flag    |
+  | 모델 로딩   | CPU        | Binary format             |
+
+  ---
+  4. 우선순위별 개선 권장사항
+
+  1. 🔴 Critical
+    - to_host() 호출 제거 → 연산이 GPU에서 연속 진행되도록
+    - cudaDeviceSynchronize() 최소화 → 스트림 기반 비동기 실행
+    - Attention score 계산을 GPU 커널로 이동
+  2. 🟠 Major
+    - Expert Parallelism을 실제 병렬로 (CUDA 스트림 + 비동기)
+    - RMSNorm에 block-level reduction 적용
+    - Reshape/Transpose를 CUDA 커널로 이동
+  3. 🟡 Minor
+    - Tensor 메모리 풀 구현 (재사용)
+    - CUDA 그래프 사용 고려
+    - Routing을 GPU로 이동

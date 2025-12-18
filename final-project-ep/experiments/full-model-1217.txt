@@ -1,0 +1,118 @@
+1216_4와 거의 같은 코드 / 1024 샘플 버전
+=============================================
+ Model: LFM2-8B-A1B
+---------------------------------------------
+ Validation: ON
+ Warm-up: ON
+ Number of samples: 1024
+=============================================
+
+Initializing inputs and outputs...Done!
+Input file info:
+  Total samples: 1024
+  Sequence length: 16
+  Processing samples: 1024
+  MPI ranks: 4
+
+Loading model from /mnt/ramdisk/model.bin...Loading LFM2-8B-A1B model from /mnt/ramdisk/model.bin
+Loading model index from /mnt/ramdisk/model.bin
+  Number of tensors: 2302
+  Index loaded successfully
+Loading embeddings...
+  Embeddings shape: 65536 x 2048
+Loading 24 decoder layers...
+  Layer 0: Conv
+  Layer 1: Conv
+  Layer 2: Attention
+  Layer 3: Conv
+  Layer 4: Conv
+  Layer 5: Conv
+  Layer 6: Attention
+  Layer 7: Conv
+  Layer 8: Conv
+  Layer 9: Conv
+  Layer 10: Attention
+  Layer 11: Conv
+  Layer 12: Conv
+  Layer 13: Conv
+  Layer 14: Attention
+  Layer 15: Conv
+  Layer 16: Conv
+  Layer 17: Conv
+  Layer 18: Attention
+  Layer 19: Conv
+  Layer 20: Conv
+  Layer 21: Attention
+  Layer 22: Conv
+  Layer 23: Conv
+Loading output layers...
+  Using tied weights for LM head
+Model loaded successfully!
+Warming up...
+Forward pass: batch=256, seq_len=16
+  Layer 0 forward time: 0.571733 seconds
+  Layer 1 forward time: 0.570707 seconds
+  Layer 2 forward time: 0.812872 seconds
+  Layer 3 forward time: 0.835567 seconds
+  Layer 4 forward time: 1.05865 seconds
+  Layer 5 forward time: 1.1901 seconds
+  Layer 6 forward time: 1.03412 seconds
+  Layer 7 forward time: 1.19721 seconds
+  Layer 8 forward time: 1.04385 seconds
+  Layer 9 forward time: 1.07394 seconds
+  Layer 10 forward time: 0.998223 seconds
+  Layer 11 forward time: 1.0084 seconds
+  Layer 12 forward time: 1.03267 seconds
+  Layer 13 forward time: 1.02087 seconds
+  Layer 14 forward time: 1.20306 seconds
+  Layer 15 forward time: 1.0354 seconds
+  Layer 16 forward time: 1.06001 seconds
+  Layer 17 forward time: 1.18433 seconds
+  Layer 18 forward time: 1.01923 seconds
+  Layer 19 forward time: 1.15344 seconds
+  Layer 20 forward time: 1.05798 seconds
+  Layer 21 forward time: 1.0037 seconds
+  Layer 22 forward time: 1.17018 seconds
+  Layer 23 forward time: 0.980477 seconds
+Done!
+
+Generating (Data Parallel with 4 ranks)...
+Forward pass: batch=256, seq_len=16
+  Layer 0 forward time: 0.427581 seconds
+  Layer 1 forward time: 0.426074 seconds
+  Layer 2 forward time: 0.520837 seconds
+  Layer 3 forward time: 0.476934 seconds
+  Layer 4 forward time: 0.465886 seconds
+  Layer 5 forward time: 0.487507 seconds
+  Layer 6 forward time: 0.492982 seconds
+  Layer 7 forward time: 0.46728 seconds
+  Layer 8 forward time: 0.482933 seconds
+  Layer 9 forward time: 0.482726 seconds
+  Layer 10 forward time: 0.523304 seconds
+  Layer 11 forward time: 0.515068 seconds
+  Layer 12 forward time: 0.497701 seconds
+  Layer 13 forward time: 0.529078 seconds
+  Layer 14 forward time: 0.586803 seconds
+  Layer 15 forward time: 0.540166 seconds
+  Layer 16 forward time: 0.496534 seconds
+  Layer 17 forward time: 0.498104 seconds
+  Layer 18 forward time: 0.475581 seconds
+  Layer 19 forward time: 0.456053 seconds
+  Layer 20 forward time: 0.470977 seconds
+  Layer 21 forward time: 0.439686 seconds
+  Layer 22 forward time: 0.452984 seconds
+  Layer 23 forward time: 0.468857 seconds
+Done!
+Elapsed time: 12.588054 (sec)
+Throughput: 81.346966 (samples/sec)
+
+Saving outputs to data/outputs.bin...Done!
+===========================================================
+Validating against reference answers...
+===========================================================
+
+Comparing 1024 samples...
+Threshold: 1e-3
+
+Top-1 Prediction Accuracy: 100% (1024/1024)
+VALID

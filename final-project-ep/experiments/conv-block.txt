@@ -1,0 +1,46 @@
+Options:
+  Batch size: 32, Seq len: 16
+  Hidden size: 2048, Kernel size: 3
+  Number of iterations: 32
+  Print output: off
+  Validation: on
+
+Initializing...
+Running CUDA convolution...
+  Iteration 1/32
+  Iteration 2/32
+  Iteration 3/32
+  Iteration 4/32
+  Iteration 5/32
+  Iteration 6/32
+  Iteration 7/32
+  Iteration 8/32
+  Iteration 9/32
+  Iteration 10/32
+  Iteration 11/32
+  Iteration 12/32
+  Iteration 13/32
+  Iteration 14/32
+  Iteration 15/32
+  Iteration 16/32
+  Iteration 17/32
+  Iteration 18/32
+  Iteration 19/32
+  Iteration 20/32
+  Iteration 21/32
+  Iteration 22/32
+  Iteration 23/32
+  Iteration 24/32
+  Iteration 25/32
+  Iteration 26/32
+  Iteration 27/32
+  Iteration 28/32
+  Iteration 29/32
+  Iteration 30/32
+  Iteration 31/32
+  Iteration 32/32
+Elapsed time: 0.017053 sec
+Throughput: 30024.71 tokens/sec
+Running CPU reference...
+Validating...
+Result: VALID

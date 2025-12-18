@@ -1,0 +1,79 @@
+1. 현재 적용된 최적화/병렬화 기법 분석
+현재 코드는 Hybrid Parallelism을 기반으로 기본적인 GPU 최적화가 적용된 상태입니다.
+
+1. Hybrid Parallelism (Data + Expert)
+- Inter-node (Data Parallelism): main.cpp에서 MPI를 이용해 전체 데이터셋을
+  노드(Rank) 단위로 분할 처리합니다.
+- Intra-node (Expert Parallelism): model.cu의 SparseMoeBlock에서 OpenMP를 사용하여 4개의
+  GPU에 Expert를 분산 배치하고 병렬로 연산을 수행합니다.
+
+2. CUDA Kernel Optimizations
+- Tiled MatMul: layer.cu에서 Shared Memory를 활용한
+  32x32 Tiling을 적용하여 Global Memory 접근을 줄였습니다.
+- Warp-level Reduction: Softmax 등에서 __shfl_down_sync를 사용하여 Warp 내 고속 연산을 수행합니다.
+- Fused Kernels: transpose_split_BCx_kernel을 통해 메모리 대역폭 낭비를 줄였습니다.
+
+3. Memory Optimization
+- P2P Communication: tensor.cu에서 cudaMemcpyPeerAsync를 활용하여 호스트를 거치지 않고
+  GPU 간 직접 데이터를 전송합니다.
+
+---
+
+2. 성능 개선 포인트 및 기대 효과 (FP32 기준)
+현재 가장 큰 병목은 MatMul 커널의 연산 효율성과 커널 실행 오버헤드(Kernel Launch Overhead),
+그리고 메모리 대역폭 효율입니다.
+
+A. MatMul 커널 고도화 (가장 큰 성능 향상 예상)
+현재 구현된 Tiled MatMul은 스레드당 1개의 결과값을 계산하므로 Arithmetic Intensity(연산 밀도)가 낮습니다.
+
+- Thread Coarsening (Register Tiling): 한 스레드가 4x4 또는 8x8 크기의 결과 블록을
+  계산하도록 수정합니다. 이렇게 하면 Shared Memory에서 데이터를 한 번 읽어와서
+  레지스터에서 여러 번 재사용할 수 있어 메모리 대역폭 압박이 크게 줄어듭니다.
+- Vectorized Memory Access: float4 자료형을 사용하여 Global/Shared Memory 접근 시
+  128-bit 단위로 데이터를 읽어와 메모리 트랜잭션 효율을 높입니다.
+- Double Buffering: 현재 타일을 계산하는 동안 다음 타일 데이터를 Shared Memory로
+  미리 로드(Prefetch)하여 메모리 레이턴시를 숨깁니다.
+- 기대 효과: Compute-bound 영역에서 1.5배 ~ 2배 성능 향상
+
+B. Kernel Fusion (Operator Fusion)
+작은 커널들이 빈번하게 호출되면 메모리 I/O와 커널 런칭 오버헤드가 발생합니다.
+
+- SwiGLU Fusion: MLP 내부의 SiLU 활성화 함수와 Element-wise Mul 연산을 하나의 커널로 합칩니다.
+- Add + RMSNorm Fusion: Residual Connection(Add)과 바로 이어지는 RMSNorm을 하나의 커널로 융합합니다.
+- 기대 효과: 메모리 대역폭 절약 및 커널 런칭 오버헤드 감소 (10% ~ 20% 향상)
+
+C. Stream-aware Computation (Overlap 극대화)
+현재 SparseMoeBlock에서 OpenMP로 GPU를 병렬화하고 있지만, 내부 연산(MLP::forward)이
+Default Stream(Stream 0)을 사용할 가능성이 높습니다.
+
+- 개선: forward 함수와 커널들이 cudaStream_t 인자를 받도록 수정하여,
+  데이터 전송(cudaMemcpyPeerAsync)과 연산이 완벽하게 비동기적으로 중첩(Overlap)되도록 해야 합니다.
+- 기대 효과: 통신 시간 은폐 (Multi-GPU 효율 극대화)
+
+D. FlashAttention 스타일 최적화
+seq_len=16으로 짧지만, Attention 연산에서 N×N 행렬을 HBM에 썼다가 다시 읽는 것은 비효율적입니다.
+
+- 개선: Shared Memory 안에서 Q, K, V 연산과 Softmax를 한 번에 처리하여
+  HBM 접근을 최소화하는 Fused Attention 커널을 구현합니다.
+- 기대 효과: Attention 레이어 속도 대폭 향상
+
+---
+
+3. 코드 품질 및 잠재적 문제점 (Non-Skeleton)
+스켈레톤 코드를 제외하고, 추가 구현된 부분이나 구조적인 측면에서의 개선점입니다.
+
+- Stream 전파 부재 (Critical):
+  Tensor::copy_to_device는 스트림을 받지만, 정작 중요한 연산 함수들(MLP::forward, matmul 등)은
+  스트림 인자를 받지 않아 Default Stream에서 실행됩니다. 이는 비동기 실행의 이점을 갉아먹고,
+  자칫하면 암시적인 동기화를 유발할 수 있습니다. 모든 forward 및 연산 함수에
+  cudaStream_t를 인자로 넘겨주는 구조로 리팩토링이 필요합니다.
+
+- 불필요한 동기화:
+  main.cpp의 루프 내 MPI_Barrier나 cudaDeviceSynchronize가 과도하게 사용되지 않았는지 점검해야 합니다.
+  특히 프로파일링 목적이 아니라면 배포 시에는 제거해야 성능 저하를 막을 수 있습니다.
+
+요약하자면, 현재 베이스라인에서 MatMul 커널의 고도화(Register Tiling, Vectorization)와 Kernel Fusion을
+적용하는 것이 FP32 성능 향상의 핵심 열쇠이며, Stream을 연산 함수까지 전파하여 GPU 활용도를 높이는 것이 중요합니다.
+
+Gemini 3 Pro (Preview) • 1x
+

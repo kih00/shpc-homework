@@ -1,0 +1,262 @@
+개선 사항: 코드 포맷팅 밑 moe 커널 추가 구현 (성능 차이 거의 없음)
+=============================================
+ Model: LFM2-8B-A1B
+---------------------------------------------
+ Validation: ON
+ Warm-up: ON
+ Number of samples: 1024
+=============================================
+
+Initializing inputs and outputs...Done!
+Input file info:
+  Total samples: 1024
+  Sequence length: 16
+  Processing samples: 1024
+  MPI ranks: 4
+
+Loading model from /mnt/ramdisk/model.bin...Loading LFM2-8B-A1B model from /mnt/ramdisk/model.bin
+Loading model index from /mnt/ramdisk/model.bin
+  Number of tensors: 2302
+  Index loaded successfully
+Loading embeddings...
+  Embeddings shape: 65536 x 2048
+Loading 24 decoder layers...
+  Layer 0: Conv
+  Layer 1: Conv
+  Layer 2: Attention
+  Layer 3: Conv
+  Layer 4: Conv
+  Layer 5: Conv
+  Layer 6: Attention
+  Layer 7: Conv
+  Layer 8: Conv
+  Layer 9: Conv
+  Layer 10: Attention
+  Layer 11: Conv
+  Layer 12: Conv
+  Layer 13: Conv
+  Layer 14: Attention
+  Layer 15: Conv
+  Layer 16: Conv
+  Layer 17: Conv
+  Layer 18: Attention
+  Layer 19: Conv
+  Layer 20: Conv
+  Layer 21: Attention
+  Layer 22: Conv
+  Layer 23: Conv
+Loading output layers...
+  Using tied weights for LM head
+Model loaded successfully!
+Warming up...
+Forward pass: batch=256, seq_len=16
+  Layer 0: 0.528159 seconds
+  Layer 1: 0.525505 seconds
+  Layer 2: 0.853734 seconds
+  Layer 3: 1.04741 seconds
+  Layer 4: 1.19088 seconds
+  Layer 5: 0.994986 seconds
+  Layer 6: 1.04894 seconds
+  Layer 7: 1.19419 seconds
+  Layer 8: 1.15494 seconds
+  Layer 9: 1.0351 seconds
+  Layer 10: 1.09339 seconds
+  Layer 11: 1.02391 seconds
+  Layer 12: 0.95633 seconds
+  Layer 13: 0.992682 seconds
+  Layer 14: 0.981651 seconds
+  Layer 15: 0.98883 seconds
+  Layer 16: 0.951635 seconds
+  Layer 17: 0.973754 seconds
+  Layer 18: 0.973743 seconds
+  Layer 19: 1.1865 seconds
+  Layer 20: 1.01712 seconds
+  Layer 21: 0.976787 seconds
+  Layer 22: 1.17196 seconds
+  Layer 23: 1.00314 seconds
+Done!
+
+Generating (Data Parallel with 4 ranks)...
+Forward pass: batch=256, seq_len=16
+  Layer 0: 0.452377 seconds
+  Layer 1: 0.453264 seconds
+  Layer 2: 0.546368 seconds
+  Layer 3: 0.505665 seconds
+  Layer 4: 0.498031 seconds
+  Layer 5: 0.558647 seconds
+  Layer 6: 0.652665 seconds
+  Layer 7: 0.498938 seconds
+  Layer 8: 0.535473 seconds
+  Layer 9: 0.502395 seconds
+  Layer 10: 0.529905 seconds
+  Layer 11: 0.529818 seconds
+  Layer 12: 0.500703 seconds
+  Layer 13: 0.515446 seconds
+  Layer 14: 0.516744 seconds
+  Layer 15: 0.498139 seconds
+  Layer 16: 0.494652 seconds
+  Layer 17: 0.49526 seconds
+  Layer 18: 0.477055 seconds
+  Layer 19: 0.496258 seconds
+  Layer 20: 0.517543 seconds
+  Layer 21: 0.484123 seconds
+  Layer 22: 0.493025 seconds
+  Layer 23: 0.5048 seconds
+Done!
+Elapsed time: 12.511602 (sec)
+Throughput: 81.844035 (samples/sec)
+
+Saving outputs to data/outputs.bin...Done!
+===========================================================
+Validating against reference answers...
+===========================================================
+
+Comparing 1024 samples...
+Threshold: 1e-3
+
+Top-1 Prediction Accuracy: 100% (1024/1024)
+VALID
+
+-----
+ 1. 현재 적용된 최적화 기법
+
+  A. 연산 최적화
+
+  | 기법                               | 파일:라인        | 상세                                                                         |
+  |------------------------------------|------------------|------------------------------------------------------------------------------|
+  | Tiled MatMul (32×32)               | layer.cu:20-63   | Shared memory tiling, #pragma unroll                                         |
+  | Optimized MatMul Transpose (64×64) | layer.cu:66-171  | Register tiling (4×4), float4 vectorization, bank conflict 회피 (+1 padding) |
+  | Warp-level Reduction               | layer.cu:227-356 | softmax, rms_norm에서 __shfl_down_sync 사용                                  |
+  | Operator Fusion                    | layer.cu:538-557 | transpose_split_BCx_kernel: transpose + split 융합                           |
+
+  B. 병렬화
+
+  | 기법                     | 파일:라인         | 상세                                          |
+  |--------------------------|-------------------|-----------------------------------------------|
+  | Multi-stream (MLP)       | model.cu:229-280  | w1/w3 projection 병렬 실행                    |
+  | Multi-stream (Attention) | model.cu:591-686  | Q/K/V projection 3개 스트림 병렬              |
+  | Expert Parallelism       | model.cu:439-502  | 32 experts → 4 GPU round-robin, OpenMP 스레드 |
+  | Data Parallelism         | main.cpp:194-280  | MPI Scatterv/Gatherv로 batch 분산             |
+  | P2P Transfer             | tensor.cu:449-474 | cudaMemcpyPeerAsync로 GPU간 직접 전송         |
+
+  C. 메모리 관리
+
+  | 기법                  | 파일:라인         | 상세                                 |
+  |-----------------------|-------------------|--------------------------------------|
+  | Lazy Host Allocation  | tensor.cu:413-426 | 필요시에만 host 메모리 할당          |
+  | Dirty Flag            | tensor.h:94-96    | Host/Device 동기화 최소화            |
+  | Global Shared Streams | model.cu:178-214  | GPU별 2개 스트림 + 3개 이벤트 재사용 |
+  | Pinned Memory         | main.cpp:151,173  | cudaMallocHost로 전송 속도 향상      |
+
+  ---
+  2. 추가 최적화 방안
+
+  A. 고효과 (기대 2배+ 향상)
+
+  | 방안              | 기대 효과               | 구현 복잡도 | 설명                                                  |
+  |-------------------|-------------------------|-------------|-------------------------------------------------------|
+  | FP16 전환         | 2-3배 + 메모리 50% 절감 | 상          | half2 연산, Tensor Core 활용 가능. 추가 점수 10% 조건 |
+  | Flash Attention   | 2-4배 (attention 부분)  | 상          | Tiled attention으로 O(N²) 메모리 → O(N)               |
+  | Persistent Kernel | 1.5-2배                 | 중          | 전체 layer를 하나의 커널로 융합                       |
+
+  B. 중효과 (기대 1.3-1.8배 향상)
+
+  | 방안                     | 기대 효과 | 구현 복잡도 | 설명                                    |
+  |--------------------------|-----------|-------------|-----------------------------------------|
+  | Memory Pool              | 1.3-1.5배 | 중          | model.cu:336-371의 cudaMalloc/Free 제거 |
+  | Weight Prefetch          | 1.2-1.4배 | 중          | 다음 layer weight를 미리 로드           |
+  | Batched Expert Execution | 1.3-1.5배 | 중          | 같은 expert에 할당된 토큰들 묶어서 처리 |
+  | Async H2D/D2H            | 1.2-1.3배 | 하          | embedding lookup, 결과 복사 overlap     |
+
+  C. 저효과 (기대 1.1-1.3배 향상)
+
+  | 방안                  | 기대 효과 | 구현 복잡도 | 설명                            |
+  |-----------------------|-----------|-------------|---------------------------------|
+  | Kernel Fusion 추가    | 1.1-1.2배 | 중          | silu+mul, add+rmsnorm 등 융합   |
+  | Vectorized Load/Store | 1.1-1.2배 | 하          | element-wise 커널에 float4 적용 |
+  | cudaGraph             | 1.1-1.2배 | 중          | 커널 launch 오버헤드 제거       |
+  | L2 Cache Optimization | 1.1배     | 하          | cudaAccessPolicyWindow 활용     |
+
+  ---
+  3. 현재 병목 지점 분석
+
+  프로파일링 예상 결과
+
+  연산 시간 비중 (추정):
+  ┌─────────────────────────────────────────────────────┐
+  │ MatMul (Q/K/V/O proj, MLP)           ~55-60%        │
+  │ Attention (score + softmax + V mul)  ~15-20%        │
+  │ MoE Routing + Scatter                ~10-15%        │
+  │ Memory Transfer (H↔D, GPU↔GPU)       ~5-10%         │
+  │ RMSNorm, RoPE, etc.                  ~5%            │
+  └─────────────────────────────────────────────────────┘
+
+  주요 병목
+
+  1. MoE 블록 내 동적 메모리 할당 (model.cu:336-371)
+    - 매 forward마다 cudaMalloc/cudaFree 호출
+    - 해결: Pre-allocated buffer pool
+  2. Expert scatter-add atomicAdd 경합 (model.cu:150-152)
+    - 다수 토큰이 같은 output 위치에 write
+    - 해결: Per-expert output buffer → 최종 합산
+  3. Host-Device 동기화 (model.cu:367, 500, 558)
+    - 라우팅 결과 H→D→H 왕복
+    - 해결: Device-only routing 또는 async overlap
+  4. Attention 메모리 사용량 (layer.cu:1019-1027)
+    - shared memory 48KB 제한으로 seq_len 제약
+    - 해결: Flash Attention 구현
+
+  ---
+  4. 권장 구현 순서
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │ Phase 1: Quick Wins (1-2일)                                 │
+  ├─────────────────────────────────────────────────────────────┤
+  │ 1. Memory Pool 구현 (MoE 동적 할당 제거)                    │
+  │ 2. Element-wise 커널 vectorization (float4)                 │
+  │ 3. Kernel fusion: silu_mul, add_rmsnorm                     │
+  └─────────────────────────────────────────────────────────────┘
+                              ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │ Phase 2: Medium Impact (2-3일)                              │
+  ├─────────────────────────────────────────────────────────────┤
+  │ 4. MoE batched expert execution                             │
+  │ 5. Device-only routing (host 왕복 제거)                     │
+  │ 6. Weight prefetching (layer N+1 미리 로드)                 │
+  └─────────────────────────────────────────────────────────────┘
+                              ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │ Phase 3: High Impact (3-5일)                                │
+  ├─────────────────────────────────────────────────────────────┤
+  │ 7. FP16 전환 (half2, __hmul2 등)                            │
+  │ 8. Flash Attention 구현                                     │
+  │ 9. Tensor Core MatMul (wmma API)                            │
+  └─────────────────────────────────────────────────────────────┘
+
+  ---
+  5. 즉시 적용 가능한 개선 포인트
+
+  (1) MoE Memory Pool 추가 (model.cu)
+
+  // SparseMoeBlock 클래스에 pre-allocated buffers 추가
+  float* d_topk_indices_pool_;
+  float* d_topk_weights_pool_;
+  // 생성자에서 한 번만 할당, forward에서 재사용
+
+  (2) Element-wise Vectorization (layer.cu)
+
+  // 현재: 1 element per thread
+  // 개선: 4 elements per thread with float4
+  __global__ void silu_kernel_vec4(const float4* X, float4* Y, size_t n4) {
+      size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+      if (idx < n4) {
+          float4 v = X[idx];
+          // silu 연산...
+      }
+  }
+
+  (3) Fused SiLU + Mul (layer.cu)
+
+  // 현재: silu(gate) → 저장 → mul(gate_silu, up)
+  // 개선: 한 커널에서 silu(gate) * up 계산
+  __global__ void silu_mul_kernel(const float* gate, const float* up, float* out, size_t n);
