@@ -480,6 +480,7 @@ void Tensor::to_device(int device_id, cudaStream_t stream) const {
         if (prev_device != -1 && prev_device != device_id_) {
             CHECK_CUDA(cudaSetDevice(prev_device));
         }
+        return;
     }
 
     // Case 2: Buffer is on another GPU and host data is clean -> P2P copy
@@ -509,6 +510,7 @@ void Tensor::to_device(int device_id, cudaStream_t stream) const {
         if (prev_device != -1 && prev_device != device_id_) {
             CHECK_CUDA(cudaSetDevice(prev_device));
         }
+        return;
     }
 
     // Case 3: Need to (re)allocate on the target device using host data.
