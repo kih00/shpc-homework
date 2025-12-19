@@ -87,10 +87,19 @@ private:
 // MLP Layer (Feed-Forward Network)
 class MLP {
 public:
+    struct Scratch {
+        Tensor gate;
+        Tensor gate_silu;
+        Tensor up;
+        Tensor hidden;
+        Tensor y_flat;
+    };
+
     MLP(const std::string& w1_file, const std::string& w2_file,
         const std::string& w3_file);
     ~MLP();
-    void forward(const Tensor& x, Tensor& y, cudaStream_t stream = 0);
+    void forward(const Tensor& x, Tensor& y, cudaStream_t stream = 0,
+                 bool use_aux = true, Scratch* scratch = nullptr);
     
 private:
     Tensor w1_;  // up projection

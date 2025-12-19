@@ -39,7 +39,7 @@ private:
     Tensor lm_head_;
 
     // GPU management
-    int layers_per_stage_[NUM_GPUS] = {7, 6, 6, 5}; // layer 0, 1 is lightweighted
+    int layers_per_stage_[NUM_GPUS] = {6, 6, 6, 6}; // 24-layer model across 4 GPUs
 
     // RoPE
     std::unique_ptr<RotaryEmbedding> rotary_emb_;
