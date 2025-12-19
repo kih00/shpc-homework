@@ -1,0 +1,152 @@
+개선 사항: pipeline parallelism을 정말로 구현함
+=============================================
+ Model: LFM2-8B-A1B
+---------------------------------------------
+ Validation: ON
+ Warm-up: ON
+ Number of samples: 1024
+=============================================
+
+Initializing inputs and outputs...Done!
+Input file info:
+  Total samples: 1024
+  Sequence length: 16
+  Processing samples: 1024
+  MPI ranks: 4
+
+Loading model from /mnt/ramdisk/model.bin...Loading LFM2-8B-A1B model from /mnt/ramdisk/model.bin
+Loading model index from /mnt/ramdisk/model.bin
+  Number of tensors: 2302
+  Index loaded successfully
+Loading embeddings...
+  Embeddings shape: 65536 x 2048
+Loading 24 decoder layers...
+  Layer 0: Conv
+  Layer 1: Conv
+  Layer 2: Attention
+  Layer 3: Conv
+  Layer 4: Conv
+  Layer 5: Conv
+  Layer 6: Attention
+  Layer 7: Conv
+  Layer 8: Conv
+  Layer 9: Conv
+  Layer 10: Attention
+  Layer 11: Conv
+  Layer 12: Conv
+  Layer 13: Conv
+  Layer 14: Attention
+  Layer 15: Conv
+  Layer 16: Conv
+  Layer 17: Conv
+  Layer 18: Attention
+  Layer 19: Conv
+  Layer 20: Conv
+  Layer 21: Attention
+  Layer 22: Conv
+  Layer 23: Conv
+Loading output layers...
+  Using tied weights for LM head
+Model loaded successfully!
+Warming up...
+Forward pass: batch=256, seq_len=16
+[Pipeline] micro 0 finished in 22983.351 ms (batch_offset=0)
+[Pipeline] micro 1 finished in 20598.298 ms (batch_offset=32)
+[Pipeline] micro 2 finished in 20514.436 ms (batch_offset=64)
+[Pipeline] micro 3 finished in 20434.178 ms (batch_offset=96)
+[Pipeline] micro 4 finished in 20351.635 ms (batch_offset=128)
+[Pipeline] micro 5 finished in 20278.449 ms (batch_offset=160)
+[Pipeline] micro 6 finished in 20254.557 ms (batch_offset=192)
+[Pipeline] micro 7 finished in 20328.299 ms (batch_offset=224)
+Done!
+
+[Pipeline] micro 0 finished in 33436.813 ms (batch_offset=0)
+[Pipeline] micro 1 finished in 31008.714 ms (batch_offset=32)
+[Pipeline] micro 2 finished in 30864.346 ms (batch_offset=64)
+[Pipeline] micro 3 finished in 30736.920 ms (batch_offset=96)
+[Pipeline] micro 4 finished in 30588.959 ms (batch_offset=128)
+[Pipeline] micro 5 finished in 30448.046 ms (batch_offset=160)
+[Pipeline] micro 6 finished in 30306.074 ms (batch_offset=192)
+[Pipeline] micro 7 finished in 30166.693 ms (batch_offset=224)
+[Pipeline] micro 0 finished in 37858.204 ms (batch_offset=0)
+[Pipeline] micro 1 finished in 29295.741 ms (batch_offset=32)
+[Pipeline] micro 2 finished in 29224.115 ms (batch_offset=64)
+[Pipeline] micro 3 finished in 29109.702 ms (batch_offset=96)
+[Pipeline] micro 4 finished in 28992.318 ms (batch_offset=128)
+[Pipeline] micro 5 finished in 28883.350 ms (batch_offset=160)
+[Pipeline] micro 0 finished in 39837.722 ms (batch_offset=0)
+[Pipeline] micro 6 finished in 28785.905 ms (batch_offset=192)
+[Pipeline] micro 1 finished in 31108.004 ms (batch_offset=32)
+[Pipeline] micro 7 finished in 28681.312 ms (batch_offset=224)
+[Pipeline] micro 2 finished in 31079.975 ms (batch_offset=64)
+[Pipeline] micro 3 finished in 31038.712 ms (batch_offset=96)
+[Pipeline] micro 4 finished in 31003.559 ms (batch_offset=128)
+[Pipeline] micro 5 finished in 30962.511 ms (batch_offset=160)
+[Pipeline] micro 6 finished in 30922.882 ms (batch_offset=192)
+[Pipeline] micro 7 finished in 30911.495 ms (batch_offset=224)
+Generating (Data Parallel with 4 ranks)...
+Forward pass: batch=256, seq_len=16
+[Pipeline] micro 0 finished in 1552.810 ms (batch_offset=0)
+[Pipeline] micro 0 finished in 1551.506 ms (batch_offset=0)
+[Pipeline] micro 0 finished in 1643.109 ms (batch_offset=0)
+[Pipeline] micro 0 finished in 1703.988 ms (batch_offset=0)
+[Pipeline] micro 1 finished in 1715.114 ms (batch_offset=32)
+[Pipeline] micro 1 finished in 1785.108 ms (batch_offset=32)
+[Pipeline] micro 1 finished in 1783.227 ms (batch_offset=32)
+[Pipeline] micro 1 finished in 1897.001 ms (batch_offset=32)
+[Pipeline] micro 2 finished in 1862.440 ms (batch_offset=64)
+[Pipeline] micro 2 finished in 1915.419 ms (batch_offset=64)
+[Pipeline] micro 2 finished in 1980.307 ms (batch_offset=64)
+[Pipeline] micro 2 finished in 2070.636 ms (batch_offset=64)
+[Pipeline] micro 3 finished in 1991.723 ms (batch_offset=96)
+[Pipeline] micro 3 finished in 2039.221 ms (batch_offset=96)
+[Pipeline] micro 3 finished in 2139.366 ms (batch_offset=96)
+[Pipeline] micro 3 finished in 2193.397 ms (batch_offset=96)
+[Pipeline] micro 4 finished in 2084.624 ms (batch_offset=128)
+[Pipeline] micro 4 finished in 2136.680 ms (batch_offset=128)
+[Pipeline] micro 4 finished in 2248.733 ms (batch_offset=128)
+[Pipeline] micro 4 finished in 2322.011 ms (batch_offset=128)
+[Pipeline] micro 5 finished in 2164.805 ms (batch_offset=160)
+[Pipeline] micro 5 finished in 2188.419 ms (batch_offset=160)
+[Pipeline] micro 5 finished in 2325.315 ms (batch_offset=160)
+[Pipeline] micro 5 finished in 2420.417 ms (batch_offset=160)
+[Pipeline] micro 6 finished in 2202.396 ms (batch_offset=192)
+[Pipeline] micro 6 finished in 2217.098 ms (batch_offset=192)
+[Pipeline] micro 6 finished in 2387.343 ms (batch_offset=192)
+[Pipeline] micro 7 finished in 2253.579 ms (batch_offset=224)
+[Pipeline] micro 6 finished in 2475.210 ms (batch_offset=192)
+[Pipeline] micro 7 finished in 2238.980 ms (batch_offset=224)
+[Pipeline] micro 7 finished in 2460.496 ms (batch_offset=224)
+[Pipeline] micro 7 finished in 2526.469 ms (batch_offset=224)
+Done!
+Elapsed time: 5.091569 (sec)
+Throughput: 201.116782 (samples/sec)
+
+Saving outputs to data/outputs.bin...Done!
+===========================================================
+Validating against reference answers...
+===========================================================
+
+Comparing 1024 samples...
+Threshold: 1e-3
+
+Top-1 Prediction Accuracy: 100% (1024/1024)
+VALID
+
+- Nodes×GPUs 하이브리드 병렬: main.cpp는 MPI로 입력 배치를 rank마다 MPI_Scatterv로 쪼개는 데이터 병렬(DP)을 유지하고,
+  각 rank 내부에서는 4 GPU 파이프라인(PP)을 돌립니다.
+  그래서 노드 수가 늘면 DP로 선형 확장, 단일 노드에서도 4‑stage 파이프라인으로 GPU 효율을 끌어올립니다.
+
+- Stage 자원 캐싱+버퍼 풀: set_stage_resources가 GPU별 BufferPool과 shared stream/event 세트를 초기화해
+  레이어 내부에서 반복 할당을 막고, RoPE·norm·attention·ShortConv·MoE가 모두 재사용 가능한 버퍼를 씁니다.
+  큰 텐서들을 stage 당 한 번만 cudaMalloc 해두고 view로 쪼개 쓰니 메모리 파편화와 alloc 오버헤드가 줄었습니다.
+- 커널 분업 및 Stream 기반 겹침: MLP와 MoE에서 보듯 g_stage_shared_streams/events를 활용해 gate/up proj를
+  서로 다른 스트림에서 병렬 계산하고, MoE 라우팅도 호스트에서 미리 bucket화해 GPU에서는 연속적인 토큰 블록만 처리하도록 했습니다.
+  attention/ShortConv도 reshape와 conv 과정을 커널 수준에서 묶는 등 불필요한 중간 복사를 최소화했습니다.
+- Tensor 메모리 관리: 텐서는 host/device dirty 플래그를 유지하면서
+  to_device/to_host가 필요한 순간에만 비동기 복사를 발동합니다.
+  최근 수정으로 호출 스레드의 CUDA 디바이스 컨텍스트를 보존하게 되어, stage별 스트림 핸들이 틀어지는 문제를 해결했습니다.
+
+- 최종 출력 경로 간소화: 마이크로배치마다 마지막 스테이지가 norm→last-token→lm_head를
+  같은 스트림에서 연달아 실행하고, 즉시 host logits 버퍼에 memcpy로 이어 붙입니다.
+  이때만 cudaStreamSynchronize를 쓰고 중간 스테이지는 이미 다음 마이크로배치 준비에 들어가도록 해 파이프라인 겹침을 유지합니다.

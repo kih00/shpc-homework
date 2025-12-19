@@ -20,7 +20,8 @@ public:
     ~LFM2Model();
 
     // Forward pass
-    void forward(const std::vector<int>& input_ids, size_t batch, size_t seq_len, Tensor& logits, cudaStream_t stream = 0);
+    void forward(const std::vector<int>& input_ids, size_t batch,
+                 size_t seq_len, Tensor& logits, cudaStream_t stream = 0);
 
 private:
     std::unique_ptr<ModelLoader> loader_;
@@ -36,8 +37,9 @@ private:
 
     // LM head (output projection)
     Tensor lm_head_;
-    size_t available_gpus_;
-    size_t layers_per_stage_;
+
+    // GPU management
+    int layers_per_stage_[NUM_GPUS] = {6, 6, 6, 6}; // 6 layers per stage for 24-layer model
 
     // RoPE
     std::unique_ptr<RotaryEmbedding> rotary_emb_;

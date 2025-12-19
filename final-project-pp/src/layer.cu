@@ -6,110 +6,58 @@
 #include <cstring>
 #include <cuda_runtime.h>
 
+// ============================================================================
+// Tensor Operations - Basic operations on tensors
+// ============================================================================
+
 namespace tensor_ops {
 
-constexpr int BLOCK_MM = 32;
 constexpr int BLOCK_OPS = 256;
-constexpr int BLOCK_SFTMX = 1024;
-
-inline dim3 make_grid_2d(size_t x, size_t y, int tx = 32, int ty = 32) {
-    return dim3((x + tx - 1) / tx, (y + ty - 1) / ty);
-}
-
-// Matrix multiply: C[m, n] = A[m, k] @ B[k, n]
-__global__ void matmul_kernel(
-    const float* A, const float* B, float* C,
-    size_t m, size_t k, size_t n) {
-
-    __shared__ float A_tile[BLOCK_MM][BLOCK_MM];
-    __shared__ float B_tile[BLOCK_MM][BLOCK_MM];
-
-    size_t row = blockIdx.y * BLOCK_MM + threadIdx.y;
-    size_t col = blockIdx.x * BLOCK_MM + threadIdx.x;
-
-    float sum = 0.0f;
-
-    for (size_t t = 0; t < (k + BLOCK_MM - 1) / BLOCK_MM; ++t) {
-        // Load A tile
-        size_t a_col = t * BLOCK_MM + threadIdx.x;
-        if (row < m && a_col < k) {
-            A_tile[threadIdx.y][threadIdx.x] = A[row * k + a_col];
-        } else {
-            A_tile[threadIdx.y][threadIdx.x] = 0.0f;
-        }
-
-        // Load B tile
-        size_t b_row = t * BLOCK_MM + threadIdx.y;
-        if (b_row < k && col < n) {
-            B_tile[threadIdx.y][threadIdx.x] = B[b_row * n + col];
-        } else {
-            B_tile[threadIdx.y][threadIdx.x] = 0.0f;
-        }
-
-        __syncthreads();
-
-        // Compute partial dot product
-        #pragma unroll
-        for (size_t p = 0; p < BLOCK_MM; ++p) {
-            sum += A_tile[threadIdx.y][p] * B_tile[p][threadIdx.x];
-        }
-        
-        __syncthreads();
-    }
-
-    if (row < m && col < n) {
-        C[row * n + col] = sum;
-    }
-}
+constexpr int TILE_M = 128;
+constexpr int TILE_N = 128;
+constexpr int TILE_K = 8;
+constexpr int TILE_M_REG = 8;
+constexpr int TILE_N_REG = 8;
+constexpr int MM_THREADS = 16;
 
 // Matrix multiply: C[m, n] = A[m, k] @ B[n, k]^T
 __global__ void matmul_transpose_kernel(
     const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C,
     size_t m, size_t k, size_t n) {
 
-    const int BM = 128;
-    const int BN = 128;
-    const int BK = 8;
-    const int TM = 8;
-    const int TN = 8;
-
-    __shared__ float As[2][BM][BK + 1];
-    __shared__ float Bs[2][BN][BK + 1];
+    // Shared memory for double buffering
+    __shared__ float As[2][TILE_M][TILE_K+1];
+    __shared__ float Bs[2][TILE_N][TILE_K+1];
 
     int tid = threadIdx.x;
-    int ty = tid / 16;
-    int tx = tid % 16;
+    int ty = tid / MM_THREADS;
+    int tx = tid % MM_THREADS;
 
-    float reg_c[TM][TN] = {0.0f};
-    float reg_a[TM];
-    float reg_b[TN];
+    // Registers for accumulation
+    float reg_c[TILE_M_REG][TILE_N_REG] = {0.0f};
+    float reg_a[TILE_M_REG], reg_b[TILE_N_REG];
     float4 load_a, load_b;
 
-    size_t a_row_start = blockIdx.y * BM;
-    size_t b_row_start = blockIdx.x * BN;
+    size_t a_row = blockIdx.y * TILE_M;
+    size_t b_row = blockIdx.x * TILE_N;
+    const float* A_ptr = A + a_row*k;
+    const float* B_ptr = B + b_row*k;
 
-    const float* A_ptr = A + a_row_start * k;
-    const float* B_ptr = B + b_row_start * k;
-
-    // Load tile 0
+    // Load first tile of A and B
     int t_row = tid / 2;
     int t_col = (tid % 2) * 4;
 
-    // Load A
-    if (t_row < BM && (a_row_start + t_row) < m && (t_col < k)) {
-            load_a = reinterpret_cast<const float4*>(&A_ptr[t_row * k + t_col])[0];
-    } else {
-            load_a = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    }
+    load_a = (t_row < TILE_M && (a_row + t_row) < m && (t_col < k))
+        ? reinterpret_cast<const float4*>(&A_ptr[t_row*k + t_col])[0]
+        : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+
     As[0][t_row][t_col] = load_a.x; As[0][t_row][t_col+1] = load_a.y;
     As[0][t_row][t_col+2] = load_a.z; As[0][t_row][t_col+3] = load_a.w;
 
-    // Load B
-    if (t_row < BN && (b_row_start + t_row) < n && (t_col < k)) {
-            load_b = reinterpret_cast<const float4*>(&B_ptr[t_row * k + t_col])[0];
-    } else {
-            load_b = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    }
+    load_b = (t_row < TILE_N && (b_row + t_row) < n && (t_col < k))
+        ? reinterpret_cast<const float4*>(&B_ptr[t_row*k + t_col])[0]
+        : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+
     Bs[0][t_row][t_col] = load_b.x; Bs[0][t_row][t_col+1] = load_b.y;
     Bs[0][t_row][t_col+2] = load_b.z; Bs[0][t_row][t_col+3] = load_b.w;
 
@@ -118,39 +66,37 @@ __global__ void matmul_transpose_kernel(
     int next = 1;
     int curr = 0;
 
-    for (size_t k_idx = 0; k_idx < k; k_idx += BK) {
-        size_t next_k = k_idx + BK;
+    // Double buffering
+    for (size_t k_idx = 0; k_idx < k; k_idx += TILE_K) {
+        size_t next_k = k_idx + TILE_K;
 
         // Prefetch next tile
         if (next_k < k) {
             int t_row = tid / 2;
             int t_col = (tid % 2) * 4;
 
-            if (t_row < BM && (a_row_start + t_row) < m && (next_k + t_col < k)) {
-                load_a = reinterpret_cast<const float4*>(&A_ptr[t_row * k + next_k + t_col])[0];
-            } else {
-                load_a = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-            }
-
-            if (t_row < BN && (b_row_start + t_row) < n && (next_k + t_col < k)) {
-                load_b = reinterpret_cast<const float4*>(&B_ptr[t_row * k + next_k + t_col])[0];
-            } else {
-                load_b = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-            }
+            load_a = (t_row < TILE_M && (a_row + t_row) < m && (next_k + t_col < k))
+                ? reinterpret_cast<const float4*>(&A_ptr[t_row*k + next_k + t_col])[0]
+                : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            load_b = (t_row < TILE_N && (b_row + t_row) < n && (next_k + t_col < k))
+                ? reinterpret_cast<const float4*>(&B_ptr[t_row*k + next_k + t_col])[0]
+                : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         }
 
         // Compute
         #pragma unroll
-        for (int i = 0; i < BK; ++i) {
+        for (int i = 0; i < TILE_K; ++i) {
             #pragma unroll
-            for (int r = 0; r < TM; ++r) reg_a[r] = As[curr][ty * TM + r][i];
+            for (int r = 0; r < TILE_M_REG; ++r)
+                reg_a[r] = As[curr][ty * TILE_M_REG + r][i];
             #pragma unroll
-            for (int c = 0; c < TN; ++c) reg_b[c] = Bs[curr][tx * TN + c][i];
+            for (int c = 0; c < TILE_N_REG; ++c)
+                reg_b[c] = Bs[curr][tx * TILE_N_REG + c][i];
 
             #pragma unroll
-            for (int r = 0; r < TM; ++r) {
+            for (int r = 0; r < TILE_M_REG; ++r) {
                 #pragma unroll
-                for (int c = 0; c < TN; ++c) {
+                for (int c = 0; c < TILE_N_REG; ++c) {
                     reg_c[r][c] += reg_a[r] * reg_b[c];
                 }
             }
@@ -159,19 +105,15 @@ __global__ void matmul_transpose_kernel(
         // Store prefetched tile to shared memory
         if (next_k < k) {
             __syncthreads();
-            
+
             int t_row = tid / 2;
             int t_col = (tid % 2) * 4;
 
-            As[next][t_row][t_col] = load_a.x;
-            As[next][t_row][t_col+1] = load_a.y;
-            As[next][t_row][t_col+2] = load_a.z;
-            As[next][t_row][t_col+3] = load_a.w;
+            As[next][t_row][t_col] = load_a.x; As[next][t_row][t_col+1] = load_a.y;
+            As[next][t_row][t_col+2] = load_a.z; As[next][t_row][t_col+3] = load_a.w;
 
-            Bs[next][t_row][t_col] = load_b.x;
-            Bs[next][t_row][t_col+1] = load_b.y;
-            Bs[next][t_row][t_col+2] = load_b.z;
-            Bs[next][t_row][t_col+3] = load_b.w;
+            Bs[next][t_row][t_col] = load_b.x; Bs[next][t_row][t_col+1] = load_b.y;
+            Bs[next][t_row][t_col+2] = load_b.z; Bs[next][t_row][t_col+3] = load_b.w;
 
             __syncthreads();
 
@@ -182,12 +124,12 @@ __global__ void matmul_transpose_kernel(
 
     // Store
     #pragma unroll
-    for (int r = 0; r < TM; ++r) {
-        int row = a_row_start + ty * TM + r;
+    for (int r = 0; r < TILE_M_REG; ++r) {
+        int row = a_row + ty * TILE_M_REG + r;
         if (row < m) {
             #pragma unroll
-            for (int c = 0; c < TN; c += 4) {
-                int col = b_row_start + tx * TN + c;
+            for (int c = 0; c < TILE_N_REG; c += 4) {
+                int col = b_row + tx * TILE_N_REG + c;
                 if (col + 3 < n) {
                     float4 v;
                     v.x = reg_c[r][c]; v.y = reg_c[r][c+1];
@@ -209,12 +151,6 @@ __global__ void add_kernel(const float* A, const float* B, float* C, size_t n) {
     if (idx < n) C[idx] = A[idx] + B[idx];
 }
 
-// Add scalar: C[n] = A[n] + b
-__global__ void add_scalar_kernel(const float* A, float b, float* C, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) C[idx] = A[idx] + b;
-}
-
 // Add bias: Y[n] = X[n] + bias[n % cols]
 __global__ void add_bias_kernel(
     const float* X, const float* bias, float* Y, size_t n, size_t cols) {
@@ -231,104 +167,12 @@ __global__ void mul_kernel(
     if (idx < n) C[idx] = A[idx] * B[idx];
 }
 
-// Multiply by scalar: C[n] = A[n] * b
-__global__ void mul_scalar_kernel(
-    const float* A, float b, float* C, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) C[idx] = A[idx] * b;
-}
-
-// Sigmoid activation: Y[n] = 1 / (1 + exp(-X[n]))
-__global__ void sigmoid_kernel(const float* X, float* Y, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        float v = X[idx];
-        Y[idx] = 1.0f / (1.0f + expf(-v));
-    }
-}
-
 // SiLU activation: Y[n] = X[n] / (1 + exp(-X[n]))
 __global__ void silu_kernel(const float* X, float* Y, size_t n) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float v = X[idx];
         Y[idx] = v / (1.0f + expf(-v));
-    }
-}
-
-// Softmax: Y[row, :] = exp(X[row, :] - max) / sum(exp(X[row, :] - max))
-__global__ void softmax_kernel(
-    const float* X, float* Y, size_t n, size_t rows) {
-    // Optimized with warp-level parallelism
-
-    size_t row = blockIdx.x;
-    if (row >= rows) return;
-
-    const float* x_row = X + row * n;
-    float* y_row = Y + row * n;
-
-    // Compute max: Warp-level -> Block-level
-    // Warp-level reduction for max
-    float local_max = -INFINITY;
-    for (size_t j = threadIdx.x; j < n; j += blockDim.x) {
-        local_max = fmaxf(local_max, x_row[j]);
-    }
-    for (int offset = warpSize/2; offset > 0; offset /= 2) {
-        local_max = fmaxf(
-            local_max, __shfl_down_sync(0xffffffff, local_max, offset));
-    }
-
-    // Cross-warp reduction using shared memory
-    __shared__ float shared_max[32]; // max 32 warps
-    int lane = threadIdx.x % warpSize;
-    int wid = threadIdx.x / warpSize;
-    if (lane == 0) shared_max[wid] = local_max;
-    __syncthreads();
-
-    // Block-level reduction (First warp)
-    if (wid == 0) {
-        local_max = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize)
-            ? shared_max[lane] : -INFINITY;
-        for (int offset = warpSize/2; offset > 0; offset /= 2) {
-            local_max = fmaxf(
-                local_max, __shfl_down_sync(0xffffffff, local_max, offset));
-        }
-        if (lane == 0) shared_max[0] = local_max;
-    }
-    __syncthreads();
-    float m = shared_max[0];
-
-    // Compute exp and sum
-    float local_sum = 0.0f;
-    for (size_t j = threadIdx.x; j < n; j += blockDim.x) {
-        float e = expf(x_row[j] - m);
-        y_row[j] = e;
-        local_sum += e;
-    }
-
-    // Compute sum: Warp-level -> Block-level
-    // Warp shuffle reduction for sum
-    for (int offset = warpSize/2; offset > 0; offset /= 2) {
-        local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
-    }
-    __shared__ float shared_sum[32];
-    if (lane == 0) shared_sum[wid] = local_sum;
-    __syncthreads();
-
-    if (wid == 0) {
-        local_sum = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize)
-            ? shared_sum[lane] : 0.0f;
-        for (int offset = warpSize/2; offset > 0; offset /= 2) {
-            local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
-        }
-        if (lane == 0) shared_sum[0] = local_sum;
-    }
-    __syncthreads();
-    float inv = 1.0f / shared_sum[0];
-
-    // Normalize
-    for (size_t j = threadIdx.x; j < n; j += blockDim.x) {
-        y_row[j] *= inv;
     }
 }
 
@@ -469,44 +313,8 @@ __global__ void repeat_kv_kernel(
     y[idx] = x[x_idx];
 }
 
-// Causal Conv1D
-// y[b, ch, s] = sum_{k=0}^{ksz-1} x[b, ch, s - (ksz -1) + k] * w[ch, 0, k] + bias[ch]
-__global__ void causal_conv1d_kernel(
-    const float* x, const float* w, const float* bias, float* y,
-    size_t batch, size_t ch, size_t seq, size_t ksz) {
-    // x: (batch, ch, seq)
-    // w: (ch, 1, ksz)
-    // bias: (ch)
-    // y: (batch, ch, seq)
-
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t total = batch * ch * seq;
-    if (idx >= total) return;
-
-    size_t s = idx % seq;
-    size_t c = (idx / seq) % ch;
-    size_t b = idx / (seq * ch);
-    float sum = 0.0f;
-
-    // x base: x[b, c, :]
-    const float* x_base = x + (b * ch + c) * seq;
-    // w base: w[c, 0, :]
-    const float* w_base = w + c * ksz;
-
-    // Convolution sum
-    for (size_t k = 0; k < ksz; ++k) {
-        int input_pos = (int)s - ((int)ksz - 1) + (int)k;
-        if (input_pos >= 0) sum += x_base[input_pos] * w_base[k];
-    }
-    if (bias) sum += bias[c];
-    y[idx] = sum;
-}
-
-// ============================================================================
-// Attention Kernels
-// ============================================================================
-
-// Reshape: (batch*seq, num_heads*head_dim) -> (batch, num_heads, seq, head_dim)
+// Reshape for K and V of attention
+// (batch*seq, num_heads*head_dim) -> (batch, num_heads, seq, head_dim)
 __global__ void reshape_to_heads_kernel(
     const float* in, float* out,
     size_t batch, size_t seq_len, size_t num_heads, size_t head_dim) {
@@ -526,7 +334,8 @@ __global__ void reshape_to_heads_kernel(
     out[idx] = in[in_idx];
 }
 
-// Reshape: (batch, num_heads, seq, head_dim) -> (batch*seq, num_heads*head_dim)
+// Reshape for output of attention
+// (batch, num_heads, seq, head_dim) -> (batch*seq, num_heads*head_dim)
 __global__ void reshape_from_heads_kernel(
     const float* in, float* out,
     size_t batch, size_t seq_len, size_t num_heads, size_t head_dim) {
@@ -546,7 +355,8 @@ __global__ void reshape_from_heads_kernel(
     out[idx] = in[in_idx];
 }
 
-// Reshape: (batch*seq, heads*dim) -> (batch, seq, heads, dim) for layernorm input
+// Reshape for layernorm input
+// (batch*seq, heads*dim) -> (batch, seq, heads, dim) for layernorm input
 __global__ void reshape_for_layernorm_kernel(
     const float* in, float* out,
     size_t batch, size_t seq_len, size_t num_heads, size_t head_dim) {
@@ -566,62 +376,17 @@ __global__ void reshape_for_layernorm_kernel(
     out[idx] = in[in_idx];
 }
 
-// Fused operation combining transpose and split for ShortConv
-// Transpose and split: (batch*seq, 3*hidden) -> B, C, x_gate each (batch, hidden, seq)
-__global__ void transpose_split_BCx_kernel(
-    const float* in, float* B, float* C, float* x_gate,
-    size_t batch, size_t seq_len, size_t hidden_size) {
-
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t total = batch * hidden_size * seq_len;
-    if (idx >= total) return;
-
-    // Output index: [b, h, s] -> idx = (b * hidden_size + h) * seq_len + s
-    size_t s = idx % seq_len;
-    size_t h = (idx / seq_len) % hidden_size;
-    size_t b = idx / (seq_len * hidden_size);
-
-    // Input index: [(b * seq_len + s), c] (c = {h, h+hidden, h+2*hidden})
-    size_t base_in_idx = (b * seq_len + s) * (3 * hidden_size);
-    
-    B[idx] = in[base_in_idx + h];
-    C[idx] = in[base_in_idx + h + hidden_size];
-    x_gate[idx] = in[base_in_idx + h + 2 * hidden_size];
-}
-
-// Transpose: (batch, hidden, seq) -> (batch, seq, hidden)
-__global__ void transpose_hidden_seq_kernel(
-    const float* in, float* out,
-    size_t batch, size_t hidden_size, size_t seq_len) {
-
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t total = batch * seq_len * hidden_size;
-    if (idx >= total) return;
-
-    // Output index: [b, s, h] -> idx = (b * seq_len + s) * hidden_size + h
-    size_t h = idx % hidden_size;
-    size_t s = (idx / hidden_size) % seq_len;
-    size_t b = idx / (hidden_size * seq_len);
-
-    // Input index: [b, h, s] -> (b * hidden_size + h) * seq_len + s
-    size_t in_idx = (b * hidden_size + h) * seq_len + s;
-    out[idx] = in[in_idx];
-}
-
-// =============================================================================
 // Fused ShortConv Kernel
-// Combines: transpose_split_BCx + mul(B*gate) + conv1d + mul(C*conv) + transpose
-// Input: in_proj_out (bs, 3*hidden)
-// Output: y_out (batch, seq, hidden) - ready for out_proj
-// =============================================================================
+// Combines: transp_split_BCx + mul(B*gate) + conv1d + mul(C*conv) + transp
 __global__ void shortconv_fused_kernel(
-    const float* __restrict__ in_proj_out,  // (batch*seq, 3*hidden)
-    const float* __restrict__ conv_w,       // (hidden, ksz)
-    const float* __restrict__ conv_bias,    // (hidden) or nullptr
-    float* __restrict__ out,                // (batch, seq, hidden)
+    const float* __restrict__ in_proj_out, const float* __restrict__ conv_w,
+    const float* __restrict__ conv_bias, float* __restrict__ out,
     size_t batch, size_t seq_len, size_t hidden_size, size_t ksz) {
+    // in_proj_out: (batch*seq, 3*hidden) --> [B, C, x_gate]
+    // conv_w: (hidden, ksz)
+    // conv_bias: (hidden) or nullptr
+    // out: (batch, seq, hidden)
 
-    // Output layout: (batch, seq, hidden)
     // Each thread computes one output element [b, s, h]
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     size_t total = batch * seq_len * hidden_size;
@@ -632,15 +397,12 @@ __global__ void shortconv_fused_kernel(
     size_t s = (idx / hidden_size) % seq_len;
     size_t b = idx / (hidden_size * seq_len);
 
-    // Read C value from in_proj_out
-    // in_proj_out layout: (batch*seq, 3*hidden) where [B, C, x_gate] are interleaved
-    // For position (b, s): base = (b * seq_len + s) * 3 * hidden
     // B at offset h, C at offset h + hidden, x_gate at offset h + 2*hidden
     size_t in_base = (b * seq_len + s) * 3 * hidden_size;
     float C_val = in_proj_out[in_base + h + hidden_size];
 
     // Compute conv1d output for this position
-    // conv_out[b, h, s] = sum_{k=0}^{ksz-1} Bx[b, h, s-(ksz-1)+k] * conv_w[h, k] + bias[h]
+    // conv_out[b, h, s] = sum{k=0..ksz-1} Bx[b, h, s-(ksz-1)+k] * conv_w[h, k] + bias[h]
     // where Bx[b, h, pos] = B[b, h, pos] * x_gate[b, h, pos]
     float conv_sum = 0.0f;
 
@@ -662,7 +424,7 @@ __global__ void shortconv_fused_kernel(
         conv_sum += conv_bias[h];
     }
 
-    // Final output: y_pre = C * conv_out (already in correct layout for out_proj)
+    // Final output: y_pre = C * conv_out (already in correct layout for out_projs)
     out[idx] = C_val * conv_sum;
 }
 
@@ -730,25 +492,6 @@ __global__ void batched_attention_kernel(
 
 // Matrix operations
 
-void matmul(const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t stream) {
-    // a: (m, k), b: (k, n), c: (m, n)
-    size_t m = a.size(0);
-    size_t k = a.size(1);
-    size_t n = b.size(1);
-    if (c.size() == 0) c = Tensor({m, n});
-
-    a.to_device(-1, stream); // Use current device
-    b.to_device(-1, stream);
-    c.to_device(-1, stream);
-
-    dim3 block(BLOCK_MM, BLOCK_MM);
-    dim3 grid = make_grid_2d(n, m, block.x, block.y);
-    matmul_kernel<<<grid, block, 0, stream>>>(
-        a.device_data(), b.device_data(), c.device_data(), m, k, n);
-
-    c.mark_device_dirty();
-}
-
 void matmul_transposed(
     const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t stream) {
     // a: (m, k), b: (n, k), c: (m, n)  [c = a @ b^T]
@@ -782,21 +525,6 @@ void add(const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t stream) {
     dim3 block(BLOCK_OPS);
     dim3 grid((n + block.x - 1) / block.x);
     add_kernel<<<grid, block, 0, stream>>>(a.device_data(), b.device_data(), c.device_data(), n);
-
-    c.mark_device_dirty();
-}
-
-void add_scalar(const Tensor& a, float b, Tensor& c, cudaStream_t stream) {
-    size_t n = a.size();
-    if (c.size() == 0) c = Tensor(a.shape());
-
-    a.to_device(-1, stream);
-    c.to_device(-1, stream);
-
-    dim3 block(BLOCK_OPS);
-    dim3 grid((n + block.x - 1) / block.x);
-    add_scalar_kernel<<<grid, block, 0, stream>>>(
-        a.device_data(), b, c.device_data(), n);
 
     c.mark_device_dirty();
 }
@@ -835,37 +563,7 @@ void mul(const Tensor& a, const Tensor& b, Tensor& c, cudaStream_t stream) {
     c.mark_device_dirty();
 }
 
-void mul_scalar(const Tensor& a, float b, Tensor& c, cudaStream_t stream) {
-    size_t n = a.size();
-    if (c.size() == 0) c = Tensor(a.shape());
-
-    a.to_device(-1, stream);
-    c.to_device(-1, stream);
-
-    dim3 block(BLOCK_OPS);
-    dim3 grid((n + block.x - 1) / block.x);
-    mul_scalar_kernel<<<grid, block, 0, stream>>>(
-        a.device_data(), b, c.device_data(), n);
-
-    c.mark_device_dirty();
-}
-
 // Activation functions
-void sigmoid(const Tensor& x, Tensor& y, cudaStream_t stream) {
-    size_t n = x.size();
-    if (y.size() == 0) y = Tensor(x.shape());
-
-    x.to_device(-1, stream);
-    y.to_device(-1, stream);
-
-    dim3 block(BLOCK_OPS);
-    dim3 grid((n + block.x - 1) / block.x);
-    sigmoid_kernel<<<grid, block, 0, stream>>>(
-        x.device_data(), y.device_data(), n);
-
-    y.mark_device_dirty();
-}
-
 void silu(const Tensor& x, Tensor& y, cudaStream_t stream) {
     size_t n = x.size();
     if (y.size() == 0) y = Tensor(x.shape());
@@ -877,26 +575,6 @@ void silu(const Tensor& x, Tensor& y, cudaStream_t stream) {
     dim3 grid((n + block.x - 1) / block.x);
     silu_kernel<<<grid, block, 0, stream>>>(
         x.device_data(), y.device_data(), n);
-
-    y.mark_device_dirty();
-}
-
-void softmax(const Tensor& x, Tensor& y, int dim, cudaStream_t stream) {
-    // For simplicity, assume dim=-1 (last dimension)
-    size_t outer_size = 1;
-    for (size_t i = 0; i < x.ndim() - 1; i++) {
-        outer_size *= x.size(i);
-    }
-    size_t inner_size = x.size(-1);
-    if (y.size() == 0) y = Tensor(x.shape());
-
-    x.to_device(-1, stream);
-    y.to_device(-1, stream);
-
-    dim3 block(inner_size >= BLOCK_SFTMX ? BLOCK_SFTMX : inner_size);
-    dim3 grid(outer_size);
-    softmax_kernel<<<grid, block, 0, stream>>>(
-        x.device_data(), y.device_data(), inner_size, outer_size);
 
     y.mark_device_dirty();
 }
@@ -1001,42 +679,6 @@ void repeat_kv(const Tensor& x, size_t n_rep, Tensor& y, cudaStream_t stream) {
     y.mark_device_dirty();
 }
 
-// Convolution operations
-void causal_conv1d(
-    const Tensor& x, const Tensor& weight, const Tensor* bias,
-    Tensor& y, cudaStream_t stream) {
-    // x: (batch, channels, seq_len) - Conv1d format
-    // weight: (channels, 1, kernel_size) - grouped conv weights
-    // bias: (channels) [optional]
-    // y: (batch, channels, seq_len)
-
-    size_t batch = x.size(0);
-    size_t channels = x.size(1);
-    size_t seq_len = x.size(2);
-    size_t kernel_size = weight.size(2);
-    if (y.size() == 0) y = Tensor({batch, channels, seq_len});
-
-    x.to_device(-1, stream);
-    weight.to_device(-1, stream);
-    if (bias) bias->to_device(-1, stream);
-    y.to_device(-1, stream);
-
-    // kernel space: total elements
-    size_t total = batch * channels * seq_len;
-    dim3 block(BLOCK_OPS);
-    dim3 grid((total + block.x - 1) / block.x);
-    causal_conv1d_kernel<<<grid, block, 0, stream>>>(
-        x.device_data(), weight.device_data(),
-        bias ? bias->device_data() : nullptr,
-        y.device_data(), batch, channels, seq_len, kernel_size);
-
-    y.mark_device_dirty();
-}
-
-// ============================================================================
-// Attention Operations
-// ============================================================================
-
 // Reshape from (batch*seq, num_heads*head_dim) to (batch, num_heads, seq, head_dim)
 void reshape_to_heads(
     const Tensor& in, Tensor& out,
@@ -1104,18 +746,8 @@ void batched_attention(
     // Each block handles one (batch, head) pair
     // Each thread handles multiple query positions
     dim3 grid(batch * num_heads);
-    dim3 block(std::min((size_t)BLOCK_OPS, seq_len));
-
-    // Shared memory: seq_len for each thread
+    dim3 block(seq_len);
     size_t shared_mem_size = block.x * seq_len * sizeof(float);
-
-    // Check if shared memory is sufficient (max ~48KB on most GPUs)
-    if (shared_mem_size > 48 * 1024) {
-        // Fallback: reduce threads or use different algorithm
-        block.x = (48 * 1024) / (seq_len * sizeof(float));
-        if (block.x < 1) block.x = 1;
-        shared_mem_size = block.x * seq_len * sizeof(float);
-    }
 
     batched_attention_kernel<<<grid, block, shared_mem_size, stream>>>(
         Q.device_data(), K.device_data(), V.device_data(), out.device_data(),
@@ -1146,59 +778,7 @@ void reshape_for_layernorm(
     out.mark_device_dirty();
 }
 
-// Transpose and split for ShortConv input
-void transpose_split_BCx(
-    const Tensor& in_proj_out, Tensor& B, Tensor& C, Tensor& x_gate,
-    size_t batch, size_t seq_len, size_t hidden_size, cudaStream_t stream) {
-    // in_proj_out: (batch*seq, 3*hidden)
-    // B, C, x_gate: (batch, hidden, seq)
-
-    if (B.size() == 0) B = Tensor({batch, hidden_size, seq_len});
-    if (C.size() == 0) C = Tensor({batch, hidden_size, seq_len});
-    if (x_gate.size() == 0) x_gate = Tensor({batch, hidden_size, seq_len});
-
-    in_proj_out.to_device(-1, stream);
-    B.to_device(-1, stream);
-    C.to_device(-1, stream);
-    x_gate.to_device(-1, stream);
-
-    size_t total = batch * hidden_size * seq_len;
-    dim3 block(BLOCK_OPS);
-    dim3 grid((total + block.x - 1) / block.x);
-    transpose_split_BCx_kernel<<<grid, block, 0, stream>>>(
-        in_proj_out.device_data(),
-        B.device_data(), C.device_data(), x_gate.device_data(),
-        batch, seq_len, hidden_size);
-
-    B.mark_device_dirty();
-    C.mark_device_dirty();
-    x_gate.mark_device_dirty();
-}
-
-// Transpose for ShortConv output
-void transpose_hidden_seq(
-    const Tensor& in, Tensor& out,
-    size_t batch, size_t hidden_size, size_t seq_len, cudaStream_t stream) {
-    // in: (batch, hidden, seq)
-    // out: (batch, seq, hidden)
-
-    if (out.size() == 0) out = Tensor({batch, seq_len, hidden_size});
-
-    in.to_device(-1, stream);
-    out.to_device(-1, stream);
-
-    size_t total = batch * seq_len * hidden_size;
-    dim3 block(BLOCK_OPS);
-    dim3 grid((total + block.x - 1) / block.x);
-    transpose_hidden_seq_kernel<<<grid, block, 0, stream>>>(
-        in.device_data(), out.device_data(),
-        batch, hidden_size, seq_len);
-
-    out.mark_device_dirty();
-}
-
 // Fused ShortConv operation
-// Combines: transp_split_BCx + mul(B*gate) + conv1d + mul(C*conv) + transp
 void shortconv_fused(
     const Tensor& in_proj_out, const Tensor& conv_weight,
     const Tensor* conv_bias, Tensor& out,
@@ -1261,4 +841,3 @@ void RotaryEmbedding::forward(size_t seq_len, Tensor& cos, Tensor& sin, cudaStre
     cos = cos_cached_.slice(0, 0, seq_len, stream);
     sin = sin_cached_.slice(0, 0, seq_len, stream);
 }
-

@@ -165,7 +165,8 @@ void Tensor::deallocate() {
 
 size_t Tensor::compute_size() const {
     if (shape_.empty()) return 0;
-    return std::accumulate(shape_.begin(), shape_.end(), 1ULL, std::multiplies<size_t>());
+    return std::accumulate(
+        shape_.begin(), shape_.end(), 1ULL, std::multiplies<size_t>());
 }
 
 size_t Tensor::size(int dim) const {
@@ -227,25 +228,29 @@ const float& Tensor::at(size_t i, size_t j, size_t k, size_t l) const {
 
 // Reshape
 void Tensor::reshape(const std::vector<size_t>& new_shape) {
-    size_t new_size = std::accumulate(new_shape.begin(), new_shape.end(), 1ULL, std::multiplies<size_t>());
+    size_t new_size = std::accumulate(
+        new_shape.begin(), new_shape.end(), 1ULL, std::multiplies<size_t>());
     if (new_size != size_) {
-        throw std::invalid_argument("New shape must have same number of elements");
+        fprintf(stderr, "New shape must have same number of elements");
+        return;
     }
     shape_ = new_shape;
 }
 
 Tensor Tensor::view(const std::vector<size_t>& new_shape) const {
     // Verify new shape has compatible number of elements (new_size <= size_)
-    size_t new_size = std::accumulate(new_shape.begin(), new_shape.end(), 1ULL, std::multiplies<size_t>());
+    size_t new_size = std::accumulate(
+        new_shape.begin(), new_shape.end(), 1ULL, std::multiplies<size_t>());
     if (new_size > size_) {
-        throw std::invalid_argument("View shape cannot exceed original tensor size");
+        fprintf(stderr, "View shape cannot exceed original tensor size");
+        return Tensor();
     }
 
     // Create a view that shares data with this tensor (no copy)
     Tensor result;
     result.shape_ = new_shape;
     result.size_ = new_size;
-    result.host_data_ = host_data_;  // Share host pointer (may be nullptr for device-only)
+    result.host_data_ = host_data_; // Share host pointer
     result.owns_host_ = false;
     result.device_data_ = device_data_;
     result.device_id_ = device_id_;
@@ -291,7 +296,8 @@ Tensor Tensor::load_from_file(const std::string& filename, ModelLoader* loader) 
     Tensor tensor(shape);
 
     // Read data
-    file.read(reinterpret_cast<char*>(tensor.data()), tensor.size() * sizeof(float));
+    file.read(
+        reinterpret_cast<char*>(tensor.data()), tensor.size() * sizeof(float));
 
     file.close();
     return tensor;
@@ -315,7 +321,8 @@ void Tensor::save_to_file(const std::string& filename) const {
     
     // Write data
     ensure_host_data();
-    file.write(reinterpret_cast<const char*>(host_data_), size_ * sizeof(float));
+    file.write(
+        reinterpret_cast<const char*>(host_data_), size_ * sizeof(float));
     
     file.close();
 }
@@ -339,21 +346,27 @@ Tensor Tensor::transpose(int dim0, int dim1) const {
         outer_size *= shape_[i];
     }
     size_t inner_size = 1;
-    for (size_t i = static_cast<size_t>(std::max(dim0, dim1)) + 1; i < shape_.size(); i++) {
+    for (size_t i = static_cast<size_t>(std::max(dim0, dim1)) + 1;
+         i < shape_.size(); i++) {
         inner_size *= shape_[i];
     }
 
-    transpose_kernel<<<(outer_size * inner_size + 255) / 256, 256>>>(
+    int grid = (outer_size * inner_size + BLOCK_DEFAULT - 1) / BLOCK_DEFAULT;
+
+    transpose_kernel<<<grid, BLOCK_DEFAULT>>>(
         device_data_, result.device_data_,
-        stride0, stride1,
-        outer_size, inner_size
-    );
+        stride0, stride1, outer_size, inner_size);
     CHECK_CUDA(cudaDeviceSynchronize());
+
+    // Mark result as dirty
     result.device_dirty_ = true;
     return result;
 }
 
-Tensor Tensor::slice(int dim, size_t start, size_t end, cudaStream_t stream) const {
+Tensor Tensor::slice(
+    int dim, size_t start, size_t end, cudaStream_t stream) const {
+
+    // Validate parameters
     if (dim < 0) dim += shape_.size();
     if (dim < 0 || static_cast<size_t>(dim) >= shape_.size()) {
         throw std::out_of_range("Dimension out of range");
@@ -365,6 +378,7 @@ Tensor Tensor::slice(int dim, size_t start, size_t end, cudaStream_t stream) con
     std::vector<size_t> new_shape = shape_;
     new_shape[dim] = end - start;
 
+    // Create new tensor to hold the slice
     Tensor result(new_shape);
     to_device(device_id_, stream);
     result.to_device(device_id_, stream);
@@ -382,15 +396,15 @@ Tensor Tensor::slice(int dim, size_t start, size_t end, cudaStream_t stream) con
     for (size_t i = 0; i < num_slices; i++) {
         size_t src_offset = i * shape_[dim] * slice_size + start * slice_size;
         size_t dst_offset = i * (end - start) * slice_size;
+
+        // Device to device copy
         CHECK_CUDA(cudaMemcpyAsync(
-            result.device_data_ + dst_offset,
-            device_data_ + src_offset,
+            result.device_data_ + dst_offset, device_data_ + src_offset,
             (end - start) * slice_size * sizeof(float),
-            cudaMemcpyDeviceToDevice,
-            stream
-        ));
+            cudaMemcpyDeviceToDevice, stream));
     }
 
+    // Mark result as dirty
     result.device_dirty_ = true;
     return result;
 }
@@ -425,114 +439,122 @@ void Tensor::ones() {
 }
 
 void Tensor::ensure_host_data() const {
+    /* After this call, host data is guaranteed to be present and up-to-date */
     if (size_ == 0) return;
+
     // Allocate host buffer if missing
     if (host_data_ == nullptr) {
         host_data_ = new float[size_];
         owns_host_ = true;
     }
+
     // If device has fresher data, sync it back
     if (device_data_ != nullptr && device_dirty_) {
-        CHECK_CUDA(cudaMemcpy(host_data_, device_data_, size_ * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(
+            host_data_, device_data_, size_ * sizeof(float),
+            cudaMemcpyDeviceToHost));
+
+        // Mark host as fresh
         device_dirty_ = false;
         host_dirty_ = false;
     }
 }
 
+// Data transfer methods
 void Tensor::to_device(int device_id, cudaStream_t stream) const {
     if (size_ == 0) return;
 
+    // prev_device: device which was active before this call
     int prev_device = -1;
     CHECK_CUDA(cudaGetDevice(&prev_device));
 
-    // If device_id is -1, use current device
-    if (device_id == -1) {
-        device_id = prev_device;
-    }
+    // target_device: device to which we want to move the tensor
+    int target_device = (device_id == -1) ? prev_device : device_id;
 
-    // Case 1: Already on target device
-    if (device_data_ != nullptr && device_id_ == device_id) {
-        // Only copy if host has newer data
+    // Case 1: already exists on the requested device -> just sync if needed
+    if (device_data_ != nullptr && device_id_ == target_device) {
         if (host_dirty_ && host_data_ != nullptr) {
-            CHECK_CUDA(cudaSetDevice(device_id_));
-            CHECK_CUDA(cudaMemcpyAsync(
-                device_data_, host_data_, size_ * sizeof(float),
-                cudaMemcpyHostToDevice, stream));
-            host_dirty_ = false;
-            device_dirty_ = false;
+            copy_host_to_device(target_device, stream);
         }
-        goto cleanup;
+        // cleanup
+        if (prev_device != -1 && prev_device != device_id_) {
+            CHECK_CUDA(cudaSetDevice(prev_device));
+        }
     }
 
-    // Case 2: Move from another device (P2P) or allocate new
-    if (device_data_ != nullptr && device_id_ != device_id && !host_dirty_) {
-        // Save old device info
+    // Case 2: Buffer is on another GPU and host data is clean -> P2P copy
+    if (device_data_ != nullptr && device_id_ != target_device && !host_dirty_) {
         float* old_device_data = device_data_;
         int old_device_id = device_id_;
         bool old_owns_device = owns_device_;
 
-        // Allocate on new device
-        device_id_ = device_id;
-        CHECK_CUDA(cudaSetDevice(device_id_));
+        CHECK_CUDA(cudaSetDevice(target_device));
         CHECK_CUDA(cudaMalloc(&device_data_, size_ * sizeof(float)));
         owns_device_ = true;
 
-        // P2P Copy: Old Device -> New Device
         CHECK_CUDA(cudaMemcpyPeerAsync(
-            device_data_, device_id_, old_device_data, old_device_id,
+            device_data_, target_device, old_device_data, old_device_id,
             size_ * sizeof(float), stream));
 
-        // Free old memory if we owned it
         if (old_owns_device) {
             CHECK_CUDA(cudaStreamSynchronize(stream));
             CHECK_CUDA(cudaSetDevice(old_device_id));
             CHECK_CUDA(cudaFree(old_device_data));
-            CHECK_CUDA(cudaSetDevice(device_id_));
         }
-        
-        // Mark device as dirty, host_dirty_ state remains
-        device_dirty_ = true;
-        goto cleanup;
+
+        CHECK_CUDA(cudaSetDevice(target_device));
+        device_id_ = target_device;
+        device_dirty_ = true; // device now holds fresher data than host
+        // cleanup
+        if (prev_device != -1 && prev_device != device_id_) {
+            CHECK_CUDA(cudaSetDevice(prev_device));
+        }
     }
 
+    // Case 3: Need to (re)allocate on the target device using host data.
     if (device_data_ != nullptr && device_dirty_) {
-        ensure_host_data();  // copies device->host if device_dirty_
+        ensure_host_data(); // pull latest data back before we reallocate
     }
 
-    // Free old device memory if on different device (This path is now only for when we didn't do P2P copy)
-    if (device_data_ != nullptr && owns_device_ && device_id_ != device_id) {
+    // Free existing device buffer if on different device
+    if (device_data_ != nullptr && owns_device_ && device_id_ != target_device) {
         CHECK_CUDA(cudaSetDevice(device_id_));
         CHECK_CUDA(cudaFree(device_data_));
         device_data_ = nullptr;
         owns_device_ = false;
     }
 
-    // Allocate on target device
-    device_id_ = device_id;
+    // Allocate on target device if needed
+    device_id_ = target_device;
     CHECK_CUDA(cudaSetDevice(device_id_));
     if (device_data_ == nullptr) {
         CHECK_CUDA(cudaMalloc(&device_data_, size_ * sizeof(float)));
         owns_device_ = true;
     }
 
-    // Copy from host if host data exists
-    if (host_data_ != nullptr) {
-        CHECK_CUDA(cudaMemcpyAsync(
-            device_data_, host_data_, size_ * sizeof(float),
-            cudaMemcpyHostToDevice, stream));
+    // Copy host data to device if needed
+    copy_host_to_device(device_id_, stream);
+}
+
+void Tensor::copy_host_to_device(int target_device, cudaStream_t stream) const {
+    if (host_data_ == nullptr) {
+        host_dirty_ = false;
+        device_dirty_ = false;
+        return;
     }
+    CHECK_CUDA(cudaSetDevice(target_device));
+    CHECK_CUDA(cudaMemcpyAsync(
+        device_data_, host_data_, size_ * sizeof(float),
+        cudaMemcpyHostToDevice, stream));
     host_dirty_ = false;
     device_dirty_ = false;
-
-cleanup:
-    if (prev_device != -1 && prev_device != device_id) {
-        CHECK_CUDA(cudaSetDevice(prev_device));
-    }
 }
 
 void Tensor::to_host(cudaStream_t stream) const {
     if (size_ == 0) return;
     ensure_host_data();
+
+    // If device data is dirty, copy it back to host
     if (device_data_ != nullptr) {
         CHECK_CUDA(cudaSetDevice(device_id_));
         CHECK_CUDA(cudaMemcpyAsync(
@@ -547,22 +569,12 @@ void Tensor::to_host(cudaStream_t stream) const {
 void Tensor::sync_device_from_host(cudaStream_t stream) const {
     if (size_ == 0 || device_data_ == nullptr) return;
     ensure_host_data();
+
+    // Copy host data to device
     CHECK_CUDA(cudaSetDevice(device_id_));
     CHECK_CUDA(cudaMemcpyAsync(
         device_data_, host_data_, size_ * sizeof(float),
         cudaMemcpyHostToDevice, stream));
     host_dirty_ = false;
     device_dirty_ = false;
-}
-
-void Tensor::sync_host_from_device(cudaStream_t stream) const {
-    if (size_ == 0 || device_data_ == nullptr) return;
-    ensure_host_data();
-    CHECK_CUDA(cudaSetDevice(device_id_));
-    CHECK_CUDA(cudaMemcpyAsync(
-        host_data_, device_data_, size_ * sizeof(float),
-        cudaMemcpyDeviceToHost, stream));
-    CHECK_CUDA(cudaStreamSynchronize(stream));
-    device_dirty_ = false;
-    host_dirty_ = false;
 }

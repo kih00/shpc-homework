@@ -17,30 +17,19 @@ public:
     void cleanup();
 
     // Attention buffers
-    Tensor q_proj_out;
-    Tensor k_proj_out;
-    Tensor v_proj_out;
-    Tensor q_reshaped;
-    Tensor k_reshaped;
-    Tensor v_reshaped;
-    Tensor q_normed;
-    Tensor k_normed;
-    Tensor q_heads;
-    Tensor k_heads;
-    Tensor v_heads;
-    Tensor k_repeated;
-    Tensor v_repeated;
+    Tensor q_proj_out, k_proj_out, v_proj_out;
+    Tensor q_reshaped, k_reshaped, v_reshaped;
+    Tensor q_normed, k_normed;
+    Tensor q_heads, k_heads, v_heads;
+    Tensor k_repeated, v_repeated;
     Tensor attn_output;
     Tensor attn_flat;
     Tensor attn_proj_out;
 
     // ShortConv buffers
     Tensor conv_in_proj;
-    Tensor conv_B;
-    Tensor conv_C;
-    Tensor conv_x_gate;
-    Tensor conv_Bx;
-    Tensor conv_out;
+    Tensor conv_B, conv_C, conv_x_gate;
+    Tensor conv_Bx, conv_out;
     Tensor conv_y_pre;
     Tensor conv_transposed;
     Tensor conv_proj_out;
@@ -48,9 +37,7 @@ public:
     // MLP buffers (for dense layers)
     Tensor mlp_gate;
     Tensor mlp_gate_silu;
-    Tensor mlp_up;
-    Tensor mlp_hidden;
-    Tensor mlp_out;
+    Tensor mlp_up, mlp_hidden, mlp_out;
 
     // DecoderLayer buffers
     Tensor layer_normed_input;
@@ -63,14 +50,14 @@ public:
 private:
     bool initialized_;
     int device_id_;
-    size_t max_batch_;
+    size_t num_samples_;
     size_t max_seq_len_;
 };
 
-// Active buffer pool/stream context for the current stage (defined in layer.cu)
-extern thread_local BufferPool* g_active_buffer_pool;
-extern thread_local cudaStream_t* g_stage_shared_streams;
-extern thread_local cudaEvent_t* g_stage_shared_events;
+// Active buffer pool/stream context for the current stage
+extern thread_local BufferPool* g_bufpool;
+extern thread_local cudaStream_t* g_streams;
+extern thread_local cudaEvent_t* g_events;
 
 void set_stage_resources(int device_id, size_t max_batch, size_t max_seq_len);
 void cleanup_stage_resources();
@@ -100,7 +87,8 @@ private:
 // MLP Layer (Feed-Forward Network)
 class MLP {
 public:
-    MLP(const std::string& w1_file, const std::string& w2_file, const std::string& w3_file, int device_id = 0);
+    MLP(const std::string& w1_file, const std::string& w2_file,
+        const std::string& w3_file);
     ~MLP();
     void forward(const Tensor& x, Tensor& y, cudaStream_t stream = 0);
     
@@ -114,7 +102,8 @@ private:
 class SparseMoeBlock {
 public:
     SparseMoeBlock(int layer_idx);
-    void forward(const Tensor& x, Tensor& y, Tensor& router_logits, cudaStream_t stream = 0);
+    void forward(const Tensor& x, Tensor& y, Tensor& router_logits,
+                 cudaStream_t stream = 0);
     
 private:
     Tensor gate_;  // router
@@ -122,7 +111,7 @@ private:
     Tensor expert_bias_;  // optional
     
     void route_tokens(const Tensor& router_logits, std::vector<int>& top_k_indices,
-                     std::vector<float>& top_k_weights, cudaStream_t stream = 0);
+                      std::vector<float>& top_k_weights, cudaStream_t stream = 0);
 };
 
 // Multi-Head Attention
@@ -131,7 +120,8 @@ public:
     Attention(int layer_idx);
     ~Attention();
     void forward(const Tensor& x, const Tensor& cos, const Tensor& sin,
-                 const Tensor* attention_mask, Tensor& output, cudaStream_t stream = 0);
+                 const Tensor* attention_mask, Tensor& output,
+                 cudaStream_t stream = 0);
     
 private:
     Tensor q_proj_;
