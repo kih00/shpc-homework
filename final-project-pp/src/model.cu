@@ -5,7 +5,6 @@
 #include <sstream>
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <random>
 #include <cstring>
 #include <utility>
@@ -26,6 +25,9 @@ thread_local int g_active_device = 0;
 // Debug print macro - only rank 0 prints
 #define DEBUG_PRINT(x) do { if (g_mpi_rank == 0) { std::cout << x; } } while(0)
 #define DEBUG_PRINTLN(x) do { if (g_mpi_rank == 0) { std::cout << x << std::endl; } } while(0)
+
+// Tuning knob: micro-batch size divisor (num_samples / NUM_BATCH)
+constexpr size_t NUM_BATCH = NUM_GPUS * 4;
 
 // ============================================================================
 // CUDA Kernels for SparseMoeBlock
@@ -1045,7 +1047,7 @@ void LFM2Model::forward(
         Tensor sin;
     };
 
-    size_t batch_size = std::max<size_t>(1, num_samples / (NUM_GPUS * 2));
+    size_t batch_size = std::max<size_t>(1, num_samples / NUM_BATCH);
     batch_size = std::min(batch_size, num_samples);
     size_t num_batch = (num_samples + batch_size - 1) / batch_size;
 
@@ -1108,10 +1110,7 @@ void LFM2Model::forward(
     float* logits_host = logits.data();
 
     // Stage synchronization gates
-    std::vector<std::atomic<int>> stage_gate(num_batch);
-    for (auto& gate : stage_gate) {
-        gate.store(0, std::memory_order_relaxed);
-    }
+    std::vector<int> stage_gate(num_batch, 0);
 
     // Pipeline execution: each stage in its own thread (using OpenMP)
     #pragma omp parallel num_threads(NUM_GPUS)
@@ -1121,8 +1120,11 @@ void LFM2Model::forward(
         set_stage_resources(stage.device_id, num_samples, seq_len);
 
         for (size_t b = 0; b < num_batch; ++b) {
-            while (stage_gate[b].load(std::memory_order_acquire) != stage_idx) {
-                // busy wait
+            while (true) {
+                int gate_val = 0;
+                #pragma omp atomic read
+                gate_val = stage_gate[b];
+                if (gate_val == stage_idx) break; // busy wait
             }
 
             BatchState& batch = batches[b];
@@ -1204,16 +1206,16 @@ void LFM2Model::forward(
                 double elapsed = get_time_layer() - batch.start_time;
                 #pragma omp critical
                 {
-                    fprintf(stdout,
-                        "[Pipeline] micro %zu finished in %.3f ms "
-                        "(batch_offset=%zu)\n",
-                        batch.id, elapsed * 1000.0, batch.offset);
+                DEBUG_PRINTLN(
+                    "[PP] batch " << batch.id << ": " << elapsed
+                    << "s (offset=" << batch.offset << ")");
                 }
                 batch.hidden = Tensor();
             }
 
             // Signal next stage
-            stage_gate[b].store(stage_idx + 1, std::memory_order_release);
+            #pragma omp atomic write
+            stage_gate[b] = stage_idx + 1;
         }
     }
 

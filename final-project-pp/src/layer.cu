@@ -21,7 +21,7 @@ constexpr int TILE_N_REG = 8;
 constexpr int MM_THREADS = 16;
 
 // Matrix multiply: C[m, n] = A[m, k] @ B[n, k]^T
-__global__ void matmul_transpose_kernel(
+__global__ void matmul_transposed_kernel(
     const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C,
     size_t m, size_t k, size_t n) {
 
@@ -507,7 +507,7 @@ void matmul_transposed(
     // Optimized kernel launch config
     dim3 block(BLOCK_OPS);
     dim3 grid((n + 127) / 128, (m + 127) / 128);
-    matmul_transpose_kernel<<<grid, block, 0, stream>>>(
+    matmul_transposed_kernel<<<grid, block, 0, stream>>>(
         a.device_data(), b.device_data(), c.device_data(), m, k, n);
 
     c.mark_device_dirty();
